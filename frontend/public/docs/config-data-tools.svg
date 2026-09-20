@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <rect width="1200" height="700" fill="#f5f7fb"/><rect width="220" height="700" fill="#213a8f"/>
+  <rect x="24" y="24" width="172" height="72" rx="8" fill="white"/><text x="110" y="66" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="30" fill="#213a8f">JSW</text>
+  <text x="28" y="132" font-family="Arial" font-weight="bold" font-size="22" fill="white">FA-IQM</text>
+  <g font-family="Arial" font-size="15" fill="#d9e7ff"><text x="35" y="205">Plant</text><text x="35" y="248">Material</text><text x="35" y="291">Supplier</text><text x="35" y="334">Quality Attributes</text></g>
+  <rect x="22" y="382" width="176" height="42" rx="5" fill="#eef8fe" stroke="#63c1f9"/><text x="110" y="408" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#213a8f">Load Demo Data</text>
+  <rect x="22" y="435" width="176" height="42" rx="5" fill="white" stroke="#b43a4a"/><text x="110" y="461" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#9b2434">Reset Entire App</text>
+  <rect x="22" y="488" width="176" height="42" rx="5" fill="white" stroke="#9aa6b5"/><text x="110" y="514" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#6a2732">Reset Master Data</text>
+  <text x="250" y="58" font-family="Arial" font-weight="bold" font-size="28" fill="#172b6b">Configuration &amp; Quality Masters</text>
+  <rect x="252" y="98" width="910" height="540" rx="10" fill="white" stroke="#dce4f2"/>
+  <text x="282" y="142" font-family="Arial" font-weight="bold" font-size="20" fill="#172b6b">Application Data Tools</text>
+  <rect x="282" y="174" width="400" height="176" rx="8" fill="#eef8fe" stroke="#63c1f9"/>
+  <text x="307" y="208" font-family="Arial" font-weight="bold" font-size="18" fill="#213a8f">Load Demo Data</text>
+  <text x="307" y="240" font-family="Arial" font-size="14" fill="#42516a">Creates 8 ferro-alloy materials, 12 suppliers,</text><text x="307" y="265" font-family="Arial" font-size="14" fill="#42516a">50,100 completed samples and 250,500 results.</text>
+  <text x="307" y="304" font-family="Arial" font-weight="bold" font-size="13" fill="#9b2434">Confirmation replaces all current application data.</text>
+  <rect x="712" y="174" width="420" height="176" rx="8" fill="#fff5f5" stroke="#d76a78"/>
+  <text x="737" y="208" font-family="Arial" font-weight="bold" font-size="18" fill="#9b2434">Reset Entire App</text>
+  <text x="737" y="240" font-family="Arial" font-size="14" fill="#42516a">Deletes masters, specifications, transactions,</text><text x="737" y="265" font-family="Arial" font-size="14" fill="#42516a">samples, results, attention and audit history.</text>
+  <text x="737" y="304" font-family="Arial" font-weight="bold" font-size="13" fill="#9b2434">Permanent action — confirmation is mandatory.</text>
+  <rect x="282" y="386" width="850" height="190" rx="8" fill="#f8faff" stroke="#dce4f2"/>
+  <text x="307" y="425" font-family="Arial" font-weight="bold" font-size="17" fill="#172b6b">Before confirming</text>
+  <g font-family="Arial" font-size="14" fill="#42516a"><text x="307" y="460">1. Export or back up any information that must be retained.</text><text x="307" y="492">2. Read the confirmation message and verify which data will be affected.</text><text x="307" y="524">3. Wait for the success message; do not close the page during demo generation.</text></g>
+  <text x="252" y="675" font-family="Arial" font-size="13" fill="#6b7782">Illustrated screen guide · Configuration data-management controls</text>
+</svg>
