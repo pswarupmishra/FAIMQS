@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.main import batch_analysis, supplier_performance_report
+from app.main import batch_analysis, supplier_performance_attribute_trend, supplier_performance_report
 from app.models import (
     Material, QualityAttribute, Receipt, Sample, Specification,
     SpecificationAttribute, Supplier, TestResult,
@@ -94,6 +94,11 @@ class BatchAnalysisTests(unittest.TestCase):
         self.assertEqual(1, data["summary"]["REJECTED"])
         self.assertEqual(2, data["by_supplier"][0]["total"])
         self.assertEqual({"ACCEPTED_WITH_DEVIATION", "REJECTED"}, {row["quality_state"] for row in data["attribute_contributors"]})
+        attribute_id = self.db.query(QualityAttribute.id).scalar()
+        trend = supplier_performance_attribute_trend(attribute_id=attribute_id, db=self.db)
+        self.assertEqual([10.0, 20.0], [point["value"] for point in trend["points"]])
+        self.assertEqual("SUP", trend["points"][0]["supplier_code"])
+        self.assertEqual(15.0, trend["stats"]["mean"])
 
 
 if __name__ == "__main__":

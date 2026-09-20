@@ -3,14 +3,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import re
 import json
+import hashlib
+import hmac
+import secrets
 from collections import defaultdict
 from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, inspect, text
 from sqlalchemy.exc import IntegrityError
 from .database import Base, engine, get_db, SessionLocal, ensure_schema_extensions
 from .models import *
@@ -30,6 +34,156 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+APP_PAGES = [
+    {"key":"dashboard","label":"Dashboard"},{"key":"receipts","label":"Receipts"},
+    {"key":"new","label":"New Receipt"},{"key":"analysis","label":"Analysis"},
+    {"key":"attention","label":"Attention Engine"},{"key":"report","label":"Report"},
+    {"key":"config","label":"Configuration"},{"key":"docs","label":"Documentation"},
+    {"key":"users","label":"User Management"},
+]
+
+def password_hash(password):
+    salt=secrets.token_bytes(16); digest=hashlib.pbkdf2_hmac("sha256",password.encode(),salt,210000)
+    return f"pbkdf2_sha256$210000${salt.hex()}${digest.hex()}"
+
+def password_matches(password,encoded):
+    try:
+        algorithm,rounds,salt,digest=encoded.split("$")
+        candidate=hashlib.pbkdf2_hmac("sha256",password.encode(),bytes.fromhex(salt),int(rounds)).hex()
+        return algorithm=="pbkdf2_sha256" and hmac.compare_digest(candidate,digest)
+    except (ValueError,TypeError): return False
+
+def user_payload(user):
+    pages=json.loads(user.group.page_permissions_json or "[]")
+    return {"id":user.id,"username":user.username,"display_name":user.display_name,"active":user.active,
+        "is_master":user.is_master,"group_id":user.group_id,"group_name":user.group.group_name,"pages":pages}
+
+def ensure_master_user():
+    db=SessionLocal()
+    try:
+        group=db.query(UserGroup).filter(UserGroup.group_name=="Administrators").first()
+        if not group:
+            group=UserGroup(group_name="Administrators",page_permissions_json=json.dumps([page["key"] for page in APP_PAGES]),is_system=True);db.add(group);db.flush()
+        admin=db.query(AppUser).filter(func.lower(AppUser.username)=="admin").first()
+        if not admin:
+            db.add(AppUser(username="admin",display_name="Master Administrator",password_hash=password_hash("admin@123"),group_id=group.id,active=True,is_master=True))
+        db.commit()
+    finally: db.close()
+
+ensure_master_user()
+
+@app.middleware("http")
+async def authenticate_api(request:Request,call_next):
+    path=request.url.path
+    if request.method=="OPTIONS" or not path.startswith("/api/v1/") or path in {"/api/v1/health","/api/v1/auth/login"}:
+        return await call_next(request)
+    authorization=request.headers.get("authorization","")
+    token=authorization[7:] if authorization.lower().startswith("bearer ") else ""
+    db=SessionLocal()
+    try:
+        token_digest=hashlib.sha256(token.encode()).hexdigest() if token else ""
+        session=(db.query(AuthSession).options(joinedload(AuthSession.user).joinedload(AppUser.group))
+            .filter(AuthSession.token_hash==token_digest,AuthSession.expires_at>datetime.utcnow()).first())
+        if not session or not session.user.active: return JSONResponse({"detail":"Authentication required"},status_code=401)
+        pages=set(json.loads(session.user.group.page_permissions_json or "[]")); required=set()
+        if path.startswith("/api/v1/admin/"): required={"users"}
+        elif path.startswith("/api/v1/attention/"): required={"attention"}
+        elif path.startswith("/api/v1/analysis/"): required={"analysis"}
+        elif path.startswith("/api/v1/reports/"): required={"report"}
+        elif path=="/api/v1/dashboard": required={"dashboard"}
+        elif path.startswith("/api/v1/documentation/"): required={"docs"}
+        elif path.startswith("/api/v1/samples/"): required={"receipts"}
+        elif path.startswith("/api/v1/receipts"):
+            required={"new"} if request.method=="POST" and path=="/api/v1/receipts" else {"dashboard","receipts","report"}
+        elif path.startswith("/api/v1/config/"): required={"config"} if request.method!="GET" else {"config","new"}
+        elif path in {"/api/v1/materials","/api/v1/suppliers"}: required={"config","new","analysis","report"}
+        if required and not pages.intersection(required): return JSONResponse({"detail":"You do not have access to this application page"},status_code=403)
+        request.state.user=session.user
+        return await call_next(request)
+    finally: db.close()
+
+def require_user_management(request:Request):
+    if "users" not in json.loads(request.state.user.group.page_permissions_json or "[]"):
+        raise HTTPException(403,"User Management access is required")
+
+@app.post("/api/v1/auth/login")
+def login(payload:dict,db:Session=Depends(get_db)):
+    username=str(payload.get("username","")).strip().lower(); password=str(payload.get("password", ""))
+    user=db.query(AppUser).options(joinedload(AppUser.group)).filter(func.lower(AppUser.username)==username).first()
+    if not user or not user.active or not password_matches(password,user.password_hash): raise HTTPException(401,"Invalid username or password")
+    token=secrets.token_urlsafe(36); db.add(AuthSession(user_id=user.id,token_hash=hashlib.sha256(token.encode()).hexdigest(),expires_at=datetime.utcnow()+timedelta(hours=12)));db.commit()
+    return {"token":token,"user":user_payload(user)}
+
+@app.get("/api/v1/auth/me")
+def auth_me(request:Request): return user_payload(request.state.user)
+
+@app.post("/api/v1/auth/logout")
+def logout(request:Request,db:Session=Depends(get_db)):
+    token=request.headers.get("authorization","")[7:]
+    db.query(AuthSession).filter(AuthSession.token_hash==hashlib.sha256(token.encode()).hexdigest()).delete();db.commit()
+    return {"message":"Signed out"}
+
+@app.get("/api/v1/admin/pages")
+def admin_pages(request:Request): require_user_management(request); return APP_PAGES
+
+@app.get("/api/v1/admin/groups")
+def admin_groups(request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);return [{"id":row.id,"group_name":row.group_name,"pages":json.loads(row.page_permissions_json or "[]"),"is_system":row.is_system,"user_count":db.query(AppUser).filter(AppUser.group_id==row.id).count()} for row in db.query(UserGroup).order_by(UserGroup.group_name).all()]
+
+@app.post("/api/v1/admin/groups")
+def create_group(payload:dict,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);name=str(payload.get("group_name","")).strip();pages=[page for page in payload.get("pages",[]) if page in {item["key"] for item in APP_PAGES}]
+    if not name: raise HTTPException(400,"Group name is required")
+    if db.query(UserGroup).filter(func.lower(UserGroup.group_name)==name.lower()).first(): raise HTTPException(409,"User group already exists")
+    row=UserGroup(group_name=name,page_permissions_json=json.dumps(pages));db.add(row);db.commit();return {"id":row.id}
+
+@app.put("/api/v1/admin/groups/{group_id}")
+def update_group(group_id:str,payload:dict,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);row=db.get(UserGroup,group_id)
+    if not row: raise HTTPException(404,"User group not found")
+    pages=[page for page in payload.get("pages",[]) if page in {item["key"] for item in APP_PAGES}]
+    if row.is_system and "users" not in pages: raise HTTPException(409,"Administrators must retain User Management access")
+    row.group_name=str(payload.get("group_name",row.group_name)).strip();row.page_permissions_json=json.dumps(pages);db.commit();return {"message":"User group updated"}
+
+@app.delete("/api/v1/admin/groups/{group_id}")
+def delete_group(group_id:str,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);row=db.get(UserGroup,group_id)
+    if not row: raise HTTPException(404,"User group not found")
+    if row.is_system or db.query(AppUser).filter(AppUser.group_id==group_id).count(): raise HTTPException(409,"System or assigned groups cannot be deleted")
+    db.delete(row);db.commit();return {"message":"User group deleted"}
+
+@app.get("/api/v1/admin/users")
+def admin_users(request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);return [user_payload(row) for row in db.query(AppUser).options(joinedload(AppUser.group)).order_by(AppUser.username).all()]
+
+@app.post("/api/v1/admin/users")
+def create_user(payload:dict,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);username=str(payload.get("username","")).strip().lower();password=str(payload.get("password", ""));group=db.get(UserGroup,payload.get("group_id"))
+    if not username or not payload.get("display_name") or len(password)<8 or not group: raise HTTPException(400,"Username, display name, valid group and an 8-character password are required")
+    if db.query(AppUser).filter(func.lower(AppUser.username)==username).first(): raise HTTPException(409,"Username already exists")
+    row=AppUser(username=username,display_name=str(payload["display_name"]).strip(),password_hash=password_hash(password),group_id=group.id,active=True);db.add(row);db.commit();return {"id":row.id}
+
+@app.put("/api/v1/admin/users/{user_id}")
+def update_user(user_id:str,payload:dict,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);row=db.get(AppUser,user_id)
+    if not row: raise HTTPException(404,"User not found")
+    if payload.get("display_name"): row.display_name=str(payload["display_name"]).strip()
+    if payload.get("group_id") and not row.is_master:
+        if not db.get(UserGroup,payload["group_id"]): raise HTTPException(400,"User group not found")
+        row.group_id=payload["group_id"]
+    if "active" in payload and not row.is_master: row.active=bool(payload["active"])
+    if payload.get("password"):
+        if len(str(payload["password"]))<8: raise HTTPException(400,"Password must contain at least 8 characters")
+        row.password_hash=password_hash(str(payload["password"]))
+    db.commit();return {"message":"User updated"}
+
+@app.delete("/api/v1/admin/users/{user_id}")
+def delete_user(user_id:str,request:Request,db:Session=Depends(get_db)):
+    require_user_management(request);row=db.get(AppUser,user_id)
+    if not row: raise HTTPException(404,"User not found")
+    if row.is_master: raise HTTPException(409,"The master admin user cannot be deleted")
+    db.query(AuthSession).filter(AuthSession.user_id==row.id).delete();db.delete(row);db.commit();return {"message":"User deleted"}
 
 def next_no(db, model, prefix):
     n = db.query(model).count() + 1
@@ -74,6 +228,33 @@ def next_spec_version(version: str):
 
 @app.get("/api/v1/health")
 def health(): return {"status":"ok"}
+
+@app.get("/api/v1/documentation/data-model")
+def documentation_data_model(db:Session=Depends(get_db)):
+    schema=inspect(engine); table_names=sorted(name for name in schema.get_table_names() if not name.startswith("sqlite_"))
+    storage={}
+    try:
+        for name,size in db.execute(text("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name")).all(): storage[name]=int(size or 0)
+    except Exception:
+        storage={}
+    tables=[]; total_rows=0; total_table_bytes=0; total_index_bytes=0
+    for table_name in table_names:
+        columns=[]
+        for column in schema.get_columns(table_name):
+            columns.append({"name":column["name"],"type":str(column["type"]),"nullable":column.get("nullable",True),"primary_key":bool(column.get("primary_key"))})
+        foreign_keys=[]
+        for key in schema.get_foreign_keys(table_name):
+            for source,target in zip(key.get("constrained_columns",[]),key.get("referred_columns",[])):
+                foreign_keys.append({"column":source,"target_table":key.get("referred_table"),"target_column":target})
+        indexes=schema.get_indexes(table_name)
+        row_count=int(db.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar() or 0)
+        table_bytes=storage.get(table_name,0); index_bytes=sum(storage.get(index["name"],0) for index in indexes)
+        total_rows+=row_count;total_table_bytes+=table_bytes;total_index_bytes+=index_bytes
+        tables.append({"name":table_name,"columns":columns,"foreign_keys":foreign_keys,"indexes":indexes,
+            "row_count":row_count,"table_bytes":table_bytes,"index_bytes":index_bytes})
+    page_size=int(db.execute(text("PRAGMA page_size")).scalar() or 0);page_count=int(db.execute(text("PRAGMA page_count")).scalar() or 0)
+    return {"generated_at":datetime.utcnow(),"database":"SQLite","table_count":len(tables),"total_rows":total_rows,
+        "database_bytes":page_size*page_count,"table_bytes":total_table_bytes,"index_bytes":total_index_bytes,"tables":tables}
 
 @app.get("/api/v1/materials", response_model=list[MaterialOut])
 def materials(db: Session=Depends(get_db)): return current_master_query(db, Material, "material").filter(Material.active==True).all()
@@ -418,6 +599,48 @@ def supplier_performance_report(material_id:Optional[str]=None,supplier_id:Optio
     contributors.sort(key=lambda row:(-row["receipt_count"],row["attribute_code"],row["quality_state"]))
     return {"summary":summary,"by_supplier":sorted(suppliers_grouped.values(),key=lambda row:(-row["total"],row["code"])),
         "by_material":sorted(materials_grouped.values(),key=lambda row:(-row["total"],row["code"])),"attribute_contributors":contributors}
+
+@app.get("/api/v1/reports/supplier-performance/attribute-trend")
+def supplier_performance_attribute_trend(attribute_id:str,material_id:Optional[str]=None,supplier_id:Optional[str]=None,date_from:Optional[str]=None,date_to:Optional[str]=None,limit:int=Query(5000,ge=1,le=10000),db:Session=Depends(get_db)):
+    limit_value=limit if isinstance(limit,int) else 5000
+    filters=[SpecificationAttribute.attribute_id==attribute_id,TestResult.numeric_result.isnot(None)]
+    if material_id: filters.append(Receipt.material_id==material_id)
+    if supplier_id: filters.append(Receipt.supplier_id==supplier_id)
+    try:
+        if date_from: filters.append(Receipt.receipt_datetime>=datetime.fromisoformat(date_from))
+        if date_to: filters.append(Receipt.receipt_datetime<datetime.fromisoformat(date_to)+timedelta(days=1))
+    except ValueError:
+        raise HTTPException(400,"Receipt dates must use YYYY-MM-DD format")
+    rows=(db.query(TestResult,Receipt).join(Sample,Sample.id==TestResult.sample_id)
+        .join(Receipt,Receipt.id==Sample.receipt_id)
+        .join(SpecificationAttribute,SpecificationAttribute.id==TestResult.specification_attribute_id)
+        .options(joinedload(TestResult.sample),joinedload(TestResult.specification_attribute).joinedload(SpecificationAttribute.attribute),
+            joinedload(Receipt.supplier),joinedload(Receipt.material),joinedload(Receipt.specification))
+        .filter(*filters).order_by(func.coalesce(TestResult.entered_at,Receipt.receipt_datetime).desc()).limit(limit_value).all())
+    rows.reverse()
+    if not rows: return {"attribute_id":attribute_id,"code":"","name":"","uom":None,"points":[],"stats":{"count":0,"mean":None,"sigma":None,"lcl":None,"ucl":None,"cpk":None}}
+    attribute=rows[0][0].specification_attribute.attribute; points=[]
+    for result,receipt in rows:
+        spec_attribute=result.specification_attribute
+        points.append({"receipt_id":receipt.id,"receipt_no":receipt.receipt_no,"reference_id":receipt.receipt_no,
+            "supplier_code":receipt.supplier.supplier_code,"supplier_name":receipt.supplier.supplier_name,
+            "supplier_batch_no":receipt.supplier_batch_no,"internal_batch_no":receipt.internal_batch_no,
+            "po_no":receipt.po_no,"grn_no":receipt.grn_no,"vehicle_no":receipt.vehicle_no,
+            "material_code":receipt.material.material_code,"material_name":receipt.material.material_name,
+            "specification_version":receipt.specification.version,"sample_no":result.sample.sample_no,
+            "date":result.entered_at or receipt.receipt_datetime,"value":float(result.numeric_result),
+            "lsl":float(spec_attribute.lsl) if spec_attribute.lsl is not None else None,
+            "aim":float(spec_attribute.aim_value) if spec_attribute.aim_value is not None else None,
+            "usl":float(spec_attribute.usl) if spec_attribute.usl is not None else None,
+            "status":result.evaluation_status,"source_count":1})
+    values=[point["value"] for point in points]; center=mean(values); sigma=pstdev(values) if len(values)>1 else 0
+    latest=points[-1]; distances=[]
+    if sigma:
+        if latest["usl"] is not None: distances.append((latest["usl"]-center)/(3*sigma))
+        if latest["lsl"] is not None: distances.append((center-latest["lsl"])/(3*sigma))
+    return {"attribute_id":attribute.id,"code":attribute.attribute_code,"name":attribute.attribute_name,"uom":attribute.uom,
+        "points":points,"truncated":len(points)==limit_value,"stats":{"count":len(values),"mean":center,"sigma":sigma,
+        "lcl":center-3*sigma,"ucl":center+3*sigma,"cpk":min(distances) if distances else None}}
 
 ANALYSIS_REFERENCE_FIELDS = {
     "supplier_batch_no", "internal_batch_no", "receipt_no", "grn_no", "po_no",

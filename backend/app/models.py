@@ -122,6 +122,35 @@ class MasterResetArchive(Base):
     entity_id = Column(String, nullable=False, index=True)
     reset_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+class UserGroup(Base):
+    __tablename__ = "user_groups"
+    id = Column(String, primary_key=True, default=uid)
+    group_name = Column(String, unique=True, nullable=False, index=True)
+    page_permissions_json = Column(Text, default="[]", nullable=False)
+    is_system = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+    id = Column(String, primary_key=True, default=uid)
+    username = Column(String, unique=True, nullable=False, index=True)
+    display_name = Column(String, nullable=False)
+    password_hash = Column(String, nullable=False)
+    group_id = Column(String, ForeignKey("user_groups.id"), nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    is_master = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    group = relationship("UserGroup")
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    id = Column(String, primary_key=True, default=uid)
+    user_id = Column(String, ForeignKey("app_users.id"), nullable=False, index=True)
+    token_hash = Column(String, unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    user = relationship("AppUser")
+
 class Receipt(Base):
     __tablename__ = "receipts"
     id = Column(String, primary_key=True, default=uid)

@@ -3,6 +3,10 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 
 const API = "http://localhost:8000/api/v1";
+const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+  const token = localStorage.getItem("faiqm_token");
+  return window.fetch(input, { ...init, headers: { ...init.headers, ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+};
 type AnyObj = Record<string, any>;
 const localDateTime = () => {
   const d = new Date();
@@ -137,8 +141,36 @@ function DataGrid({
     </div>
   );
 }
+function LoginPage({ onLogin }: { onLogin: (user: any) => void }) {
+  const [username,setUsername]=useState(""),[password,setPassword]=useState(""),[error,setError]=useState(""),[busy,setBusy]=useState(false);
+  const submit=async(event:any)=>{event.preventDefault();setBusy(true);setError("");try{const response=await apiFetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to sign in");localStorage.setItem("faiqm_token",body.token);onLogin(body.user);}catch(reason){setError(reason instanceof Error?reason.message:"Unable to sign in");}finally{setBusy(false)}};
+  return <div className="loginPage"><div className="loginVisual"><div className="loginBrand"><img src="/jsw-group-logo.webp" alt="JSW Group"/><span>FA-IQM</span></div><div><span className="eyebrow">FERRO ALLOY STORE</span><h1>Incoming Quality<br/>Management</h1><p>Controlled receipts, laboratory quality, specifications and supplier insights in one secure workspace.</p></div><small>Integrated Steel Plant · Quality Assurance</small></div><form className="loginCard" onSubmit={submit}><span className="eyebrow">SECURE ACCESS</span><h2>Welcome back</h2><p>Sign in with your FA-IQM credentials.</p>{error&&<div className="loginError">{error}</div>}<label>Username<input autoFocus autoComplete="username" value={username} onChange={event=>setUsername(event.target.value)} required/></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} required/></label><button className="primary" disabled={busy}>{busy?"Signing in…":"Sign In"}</button></form></div>;
+}
+
+function ManagedUserRow({ user, groups, refresh, notify }: any) {
+  const [form,setForm]=useState({display_name:user.display_name,group_id:user.group_id,active:user.active,password:""});
+  const save=async()=>{const response=await apiFetch(API+`/admin/users/${user.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(form)});const body=await response.json();notify(response.ok?"User updated.":body.detail);if(response.ok){setForm({...form,password:""});refresh();}};
+  const remove=async()=>{if(!confirm(`Delete user ${user.username}?`))return;const response=await apiFetch(API+`/admin/users/${user.id}`,{method:"DELETE"});const body=await response.json();notify(response.ok?"User deleted.":body.detail);if(response.ok)refresh();};
+  return <tr><td><b>{user.username}</b>{user.is_master&&<><br/><small>MASTER USER</small></>}</td><td><input value={form.display_name} onChange={event=>setForm({...form,display_name:event.target.value})}/></td><td><select disabled={user.is_master} value={form.group_id} onChange={event=>setForm({...form,group_id:event.target.value})}>{groups.map((group:any)=><option key={group.id} value={group.id}>{group.group_name}</option>)}</select></td><td><input autoComplete="new-password" placeholder="New password (optional)" type="password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})}/></td><td><label className="check"><input disabled={user.is_master} type="checkbox" checked={form.active} onChange={event=>setForm({...form,active:event.target.checked})}/> Active</label></td><td><div className="rowActions"><button onClick={save}>Save</button><button className="danger" disabled={user.is_master} onClick={remove}>Delete</button></div></td></tr>;
+}
+
+function UserManagement({ notify }: any) {
+  const [area,setArea]=useState("USERS"),[users,setUsers]=useState<any[]>([]),[groups,setGroups]=useState<any[]>([]),[pages,setPages]=useState<any[]>([]),
+    [userForm,setUserForm]=useState({username:"",display_name:"",password:"",group_id:""}),[groupForm,setGroupForm]=useState<any>({id:"",group_name:"",pages:[]});
+  const load=async()=>{const [userRows,groupRows,pageRows]=await Promise.all([apiFetch(API+"/admin/users").then(r=>r.json()),apiFetch(API+"/admin/groups").then(r=>r.json()),apiFetch(API+"/admin/pages").then(r=>r.json())]);setUsers(userRows);setGroups(groupRows);setPages(pageRows);setUserForm(current=>({...current,group_id:current.group_id||groupRows[0]?.id||""}));};
+  useEffect(()=>{load()},[]);
+  const addUser=async(event:any)=>{event.preventDefault();const response=await apiFetch(API+"/admin/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(userForm)});const body=await response.json();notify(response.ok?"User created.":body.detail);if(response.ok){setUserForm({username:"",display_name:"",password:"",group_id:groups[0]?.id||""});load();}};
+  const saveGroup=async(event:any)=>{event.preventDefault();const response=await apiFetch(API+(groupForm.id?`/admin/groups/${groupForm.id}`:"/admin/groups"),{method:groupForm.id?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(groupForm)});const body=await response.json();notify(response.ok?`User group ${groupForm.id?"updated":"created"}.`:body.detail);if(response.ok){setGroupForm({id:"",group_name:"",pages:[]});load();}};
+  const editGroup=(group:any)=>setGroupForm({id:group.id,group_name:group.group_name,pages:[...group.pages]});
+  const deleteGroup=async(group:any)=>{if(!confirm(`Delete group ${group.group_name}?`))return;const response=await apiFetch(API+`/admin/groups/${group.id}`,{method:"DELETE"});const body=await response.json();notify(response.ok?"User group deleted.":body.detail);if(response.ok)load();};
+  return <><div className="configTabs"><button className={area==="USERS"?"active":""} onClick={()=>setArea("USERS")}>Users</button><button className={area==="GROUPS"?"active":""} onClick={()=>setArea("GROUPS")}>User Groups & Page Access</button></div>
+    {area==="USERS"?<><section className="panel"><div className="panelTitle"><div><h2>Add User</h2><p className="muted">Create credentials and assign the user to an access group.</p></div></div><form className="userCreateForm" autoComplete="off" onSubmit={addUser}><label>Username<input autoComplete="off" value={userForm.username} onChange={event=>setUserForm({...userForm,username:event.target.value})} required/></label><label>Display Name<input autoComplete="off" value={userForm.display_name} onChange={event=>setUserForm({...userForm,display_name:event.target.value})} required/></label><label>Initial Password<input autoComplete="new-password" type="password" minLength={8} value={userForm.password} onChange={event=>setUserForm({...userForm,password:event.target.value})} required/></label><label>User Group<select value={userForm.group_id} onChange={event=>setUserForm({...userForm,group_id:event.target.value})} required>{groups.map(group=><option key={group.id} value={group.id}>{group.group_name}</option>)}</select></label><button className="primary">Add User</button></form></section><section className="panel"><h2>Users & Credentials</h2><div className="tablewrap"><table className="userTable"><thead><tr><th>Username</th><th>Display Name</th><th>User Group</th><th>Reset Password</th><th>Status</th><th>Actions</th></tr></thead><tbody>{users.map(user=><ManagedUserRow key={user.id} user={user} groups={groups} refresh={load} notify={notify}/>)}</tbody></table></div></section></>:<><section className="panel"><div className="panelTitle"><div><h2>{groupForm.id?"Edit User Group":"Add User Group"}</h2><p className="muted">Select every application page members of this group may access.</p></div>{groupForm.id&&<button onClick={()=>setGroupForm({id:"",group_name:"",pages:[]})}>Cancel Edit</button>}</div><form onSubmit={saveGroup}><label className="groupNameField">Group Name<input value={groupForm.group_name} onChange={event=>setGroupForm({...groupForm,group_name:event.target.value})} required/></label><div className="pagePermissionGrid">{pages.map(page=><label className="check" key={page.key}><input type="checkbox" checked={groupForm.pages.includes(page.key)} onChange={event=>setGroupForm({...groupForm,pages:event.target.checked?[...groupForm.pages,page.key]:groupForm.pages.filter((key:string)=>key!==page.key)})}/>{page.label}</label>)}</div><div className="actions"><button className="primary">{groupForm.id?"Save Group":"Add Group"}</button></div></form></section><section className="panel"><h2>Configured User Groups</h2><DataGrid rows={groups} searchText={group=>`${group.group_name} ${group.pages.join(" ")}`} sortOptions={[["Group",group=>group.group_name],["Users",group=>group.user_count]]}>{gridRows=><div className="tablewrap"><table><thead><tr><th>Group</th><th>Accessible Pages</th><th>Users</th><th>Actions</th></tr></thead><tbody>{gridRows.map(group=><tr key={group.id}><td><b>{group.group_name}</b>{group.is_system&&<><br/><small>SYSTEM GROUP</small></>}</td><td><div className="permissionBadges">{group.pages.map((key:string)=><Badge key={key}>{pages.find(page=>page.key===key)?.label||key}</Badge>)}</div></td><td>{group.user_count}</td><td><div className="rowActions"><button onClick={()=>editGroup(group)}>Edit</button><button className="danger" disabled={group.is_system||group.user_count>0} onClick={()=>deleteGroup(group)}>Delete</button></div></td></tr>)}</tbody></table></div>}</DataGrid></section></>}
+  </>;
+}
+
 function App() {
-  const [tab, setTab] = useState("dashboard"),
+  const [authUser,setAuthUser]=useState<any>(null),[authChecking,setAuthChecking]=useState(true),
+    [tab, setTab] = useState("dashboard"),
     [dash, setDash] = useState<AnyObj>({}),
     [receipts, setReceipts] = useState<any[]>([]),
     [blockedReceipts, setBlockedReceipts] = useState<any[]>([]),
@@ -166,7 +198,7 @@ function App() {
     receipt_datetime: localDateTime(),
   });
   const get = async (path: string) => {
-    const r = await fetch(API + path);
+const r = await apiFetch(API + path);
     return r.json();
   };
   const load = async () => {
@@ -179,12 +211,13 @@ function App() {
     setSmsLocations(await get("/config/sms-locations"));
     setStores(await get("/config/store-locations"));
   };
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(()=>{const token=localStorage.getItem("faiqm_token");if(!token){setAuthChecking(false);return;}apiFetch(API+"/auth/me").then(async response=>{if(!response.ok)throw new Error();setAuthUser(await response.json());}).catch(()=>localStorage.removeItem("faiqm_token")).finally(()=>setAuthChecking(false));},[]);
+  useEffect(()=>{if(authUser)load();},[authUser?.id]);
+  useEffect(()=>{if(authUser&&!authUser.pages?.includes(tab)&&!(tab==="detail"&&authUser.pages?.includes("receipts")))setTab(authUser.pages?.[0]||"")},[authUser,tab]);
+  const logout=async()=>{await apiFetch(API+"/auth/logout",{method:"POST"}).catch(()=>null);localStorage.removeItem("faiqm_token");setAuthUser(null);setTab("dashboard")};
   const createReceipt = async (e: any) => {
     e.preventDefault();
-    const r = await fetch(API + "/receipts", {
+const r = await apiFetch(API + "/receipts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
@@ -208,7 +241,7 @@ function App() {
     setTab("detail");
   };
   const act = async (url: string, method = "POST", body?: any) => {
-    const r = await fetch(API + url, {
+const r = await apiFetch(API + url, {
       method,
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
@@ -240,6 +273,9 @@ function App() {
     );
     await openTests({ id: sid });
   };
+  if(authChecking)return <div className="authLoading">Loading secure workspace…</div>;
+  if(!authUser)return <LoginPage onLogin={setAuthUser}/>;
+  const allowedPages:string[]=authUser.pages||[];
   const title =
     tab === "dashboard"
       ? "Quality Control Center"
@@ -255,6 +291,8 @@ function App() {
                 ? "Batch & Quality Analysis"
               : tab === "report"
                 ? "Material Quality Register"
+                : tab === "users"
+                  ? "User Management"
                 : tab === "docs"
                   ? "FA-IQM Documentation"
                   : "Incoming Receipts";
@@ -279,7 +317,8 @@ function App() {
           ["report", "Report"],
           ["config", "Configuration"],
           ["docs", "Documentation"],
-        ].map(([k, l]) => (
+          ["users", "User Management"],
+        ].filter(([k])=>allowedPages.includes(k)).map(([k, l]) => (
           <button
             key={k}
             className={tab === k ? "active" : ""}
@@ -300,7 +339,7 @@ function App() {
             <h1>{title}</h1>
             <p>Ferro Alloy Store · Laboratory · Quality</p>
           </div>
-          <Badge>● SYSTEM ONLINE</Badge>
+          <div className="userMenu"><span><b>{authUser.display_name}</b><small>{authUser.group_name}</small></span><button onClick={logout}>Sign Out</button></div>
         </header>
         {msg && (
           <div className="message" onClick={() => setMsg("")}>
@@ -530,9 +569,34 @@ function App() {
           <ReportPage openReceipt={openReceipt} materials={materials} suppliers={suppliers} />
         )}
         {tab === "docs" && <DocumentationPage />}
+        {tab === "users" && <UserManagement notify={setMsg} />}
       </main>
     </div>
   );
+}
+
+const formatBytes=(value:number)=>value>=1024*1024?`${(value/(1024*1024)).toFixed(1)} MB`:value>=1024?`${(value/1024).toFixed(1)} KB`:`${value||0} B`;
+function DataModelDocumentation(){
+  const [data,setData]=useState<any>(null),[error,setError]=useState(""),[zoom,setZoom]=useState(.72),[pan,setPan]=useState({x:30,y:30}),[drag,setDrag]=useState<any>(null);
+  useEffect(()=>{apiFetch(API+"/documentation/data-model").then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to inspect database");setData(body)}).catch(reason=>setError(reason instanceof Error?reason.message:"Unable to inspect database"))},[]);
+  if(error)return <div className="message">{error}</div>;
+  if(!data)return <div className="empty">Inspecting live database schema…</div>;
+  const cols=4,cardWidth=270,rowHeight=300,gap=45,positions=new Map<string,{x:number,y:number}>();
+  data.tables.forEach((table:any,index:number)=>positions.set(table.name,{x:(index%cols)*(cardWidth+gap)+40,y:Math.floor(index/cols)*rowHeight+40}));
+  const canvasWidth=cols*(cardWidth+gap)+40,canvasHeight=Math.ceil(data.tables.length/cols)*rowHeight+40;
+  const relationships=data.tables.flatMap((table:any)=>table.foreign_keys.map((key:any)=>({from:table.name,to:key.target_table,column:key.column})));
+  return <><WikiTitle title="Live Data Model" intro="Interactive entity-relationship view and storage statistics derived from the running SQLite schema."/>
+    <div className="dbSummaryCards"><div><span>Tables</span><strong>{data.table_count}</strong></div><div><span>Total Rows</span><strong>{data.total_rows.toLocaleString()}</strong></div><div><span>Database Size</span><strong>{formatBytes(data.database_bytes)}</strong></div><div><span>Table / Index</span><strong>{formatBytes(data.table_bytes)} / {formatBytes(data.index_bytes)}</strong></div></div>
+    <WikiSection title="Interactive Entity Relationship Diagram"><div className="erdToolbar"><button onClick={()=>setZoom(value=>Math.max(.35,value-.1))}>− Zoom</button><span>{Math.round(zoom*100)}%</span><button onClick={()=>setZoom(value=>Math.min(1.6,value+.1))}>+ Zoom</button><button onClick={()=>{setZoom(.72);setPan({x:30,y:30})}}>Reset View</button><small>Drag to pan · Mouse wheel to zoom</small></div>
+      <div className="erdViewport" onWheel={event=>{event.preventDefault();setZoom(value=>Math.max(.35,Math.min(1.6,value+(event.deltaY<0?.08:-.08))))}} onPointerDown={event=>{(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);setDrag({x:event.clientX,y:event.clientY,pan})}} onPointerMove={event=>{if(drag)setPan({x:drag.pan.x+event.clientX-drag.x,y:drag.pan.y+event.clientY-drag.y})}} onPointerUp={()=>setDrag(null)} onPointerCancel={()=>setDrag(null)}>
+        <div className="erdCanvas" style={{width:canvasWidth,height:canvasHeight,transform:`translate(${pan.x}px,${pan.y}px) scale(${zoom})`}}>
+          <svg width={canvasWidth} height={canvasHeight} className="erdRelations">{relationships.map((relation:any,index:number)=>{const from=positions.get(relation.from)!,to=positions.get(relation.to)!;const x1=from.x+cardWidth/2,y1=from.y+110,x2=to.x+cardWidth/2,y2=to.y+110;return <g key={`${relation.from}-${relation.column}-${index}`}><line x1={x1} y1={y1} x2={x2} y2={y2}/><circle cx={x1} cy={y1} r="4"/><path d={`M ${x2-7} ${y2-5} L ${x2} ${y2} L ${x2-7} ${y2+5}`}/></g>})}</svg>
+          {data.tables.map((table:any)=>{const position=positions.get(table.name)!;return <article className="erdEntity" key={table.name} style={{left:position.x,top:position.y,width:cardWidth}}><h3>{table.name}<span>{table.row_count.toLocaleString()} rows</span></h3><div>{table.columns.map((column:any)=><p key={column.name} className={column.primary_key?"primaryColumn":table.foreign_keys.some((key:any)=>key.column===column.name)?"foreignColumn":""}><span>{column.primary_key?"PK":table.foreign_keys.some((key:any)=>key.column===column.name)?"FK":""}</span><b>{column.name}</b><small>{column.type}</small></p>)}</div></article>})}
+        </div>
+      </div>
+    </WikiSection>
+    <WikiSection title="Database Statistics"><p>Live row counts and SQLite page allocation. Table and index sizes depend on the current database state and may include unused space within allocated pages.</p><DataGrid rows={data.tables} searchText={(table)=>`${table.name} ${table.columns.map((column:any)=>column.name).join(" ")}`} sortOptions={[["Table",table=>table.name],["Rows",table=>table.row_count],["Table size",table=>table.table_bytes],["Index size",table=>table.index_bytes],["Indexes",table=>table.indexes.length]]} initialPageSize={25} exportName="database-statistics">{gridRows=><div className="tablewrap"><table><thead><tr><th>Table</th><th>Rows</th><th>Columns</th><th>Relationships</th><th>Indexes</th><th>Table Size</th><th>Index Size</th><th>Total Allocated</th></tr></thead><tbody>{gridRows.map((table:any)=><tr key={table.name}><td><b>{table.name}</b></td><td>{table.row_count.toLocaleString()}</td><td>{table.columns.length}</td><td>{table.foreign_keys.length}</td><td>{table.indexes.length}<br/><small>{table.indexes.map((index:any)=>index.name).join(", ")||"—"}</small></td><td>{formatBytes(table.table_bytes)}</td><td>{formatBytes(table.index_bytes)}</td><td>{formatBytes(table.table_bytes+table.index_bytes)}</td></tr>)}</tbody></table></div>}</DataGrid></WikiSection>
+  </>;
 }
 
 function DocumentationPage() {
@@ -543,6 +607,7 @@ function DocumentationPage() {
     ["logic", "Application Logic"],
     ["user", "User Guide"],
     ["api", "API Documentation"],
+    ["data-model", "Data Model"],
   ];
   return (
     <div className="wikiLayout">
@@ -1001,6 +1066,7 @@ function DocumentationPage() {
             </WikiNote>
           </>
         )}
+        {section === "data-model" && <DataModelDocumentation />}
       </article>
     </div>
   );
@@ -1285,7 +1351,7 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
     if (filters.material_id) params.set("material_id", filters.material_id);
     if (filters.search.trim()) params.set("search", filters.search.trim());
     try {
-      const response = await fetch(API + `/analysis/batches?${params}`);
+const response = await apiFetch(API + `/analysis/batches?${params}`);
       const body = await response.json();
       if (!response.ok) {
         notify(body.detail || "Unable to load batch analysis");
@@ -1316,7 +1382,7 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
     if (filters.material_id) params.set("material_id", filters.material_id);
     if (filters.search.trim()) params.set("search", filters.search.trim());
     try {
-      const response = await fetch(API + `/analysis/batches?${params}`);
+      const response = await apiFetch(API + `/analysis/batches?${params}`);
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || "Unable to load analysis detail");
       setDetailSeries(body.series || []);
@@ -1430,10 +1496,13 @@ const PERFORMANCE_STATES = [
 ];
 
 function PerformanceBreakdown({ title, rows, display }: any) {
+  const [page,setPage]=useState(1), pageCount=Math.max(1,Math.ceil(rows.length/7)), safePage=Math.min(page,pageCount), visibleRows=rows.slice((safePage-1)*7,safePage*7);
+  useEffect(()=>setPage(1),[rows.length]);
   const metric = (value: number, total: number) => display === "PERCENT" ? `${total ? ((value / total) * 100).toFixed(1) : "0.0"}%` : value.toLocaleString();
   return <section className="panel performancePanel"><div className="panelTitle"><div><h2>{title}</h2><p className="muted">Receipt quality-state distribution</p></div><Badge>{rows.length} GROUPS</Badge></div>
-    <div className="performanceBars">{rows.map((row: any) => <div className="performanceBarRow" key={row.id}><div className="performanceBarLabel"><b>{row.code}</b><span>{row.name}</span><strong>{row.total.toLocaleString()}</strong></div><div className="performanceTrack">{PERFORMANCE_STATES.map(([state, label]) => row[state] ? <div key={state} className={`performanceSegment ${state.toLowerCase()}`} style={{width:`${(row[state] / row.total) * 100}%`}} title={`${label}: ${metric(row[state], row.total)}`}><span>{metric(row[state], row.total)}</span></div> : null)}</div></div>)}</div>
+    <div className="performanceBars">{visibleRows.map((row: any) => <div className="performanceBarRow" key={row.id}><div className="performanceBarLabel"><b>{row.code}</b><span>{row.name}</span><strong>{row.total.toLocaleString()}</strong></div><div className="performanceTrack">{PERFORMANCE_STATES.map(([state, label]) => row[state] ? <div key={state} className={`performanceSegment ${state.toLowerCase()}`} style={{width:`${(row[state] / row.total) * 100}%`}} title={`${label}: ${metric(row[state], row.total)}`}><span>{metric(row[state], row.total)}</span></div> : null)}</div></div>)}</div>
     {!rows.length && <div className="empty">No receipts match the selected filters.</div>}
+    {rows.length>7&&<div className="dataGridPager"><button disabled={safePage===1} onClick={()=>setPage(safePage-1)}>Previous</button><span>Page <b>{safePage}</b> of <b>{pageCount}</b></span><button disabled={safePage===pageCount} onClick={()=>setPage(safePage+1)}>Next</button></div>}
   </section>;
 }
 
@@ -1441,11 +1510,13 @@ function SupplierPerformanceReport({ materials, suppliers }: any) {
   const [filters,setFilters]=useState({supplier:"",material:"",from:"",to:""}),
     [display,setDisplay]=useState("ABSOLUTE"),
     [data,setData]=useState<any>({summary:{total:0,ACCEPTED:0,ACCEPTED_WITH_DEVIATION:0,REJECTED:0,OTHER:0},by_supplier:[],by_material:[],attribute_contributors:[]}),
-    [loading,setLoading]=useState(false),[error,setError]=useState(""),[drillState,setDrillState]=useState("REJECTED");
-  useEffect(()=>{const params=new URLSearchParams();if(filters.supplier)params.set("supplier_id",filters.supplier);if(filters.material)params.set("material_id",filters.material);if(filters.from)params.set("date_from",filters.from);if(filters.to)params.set("date_to",filters.to);setLoading(true);setError("");fetch(API+`/reports/supplier-performance?${params}`).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to load supplier performance");return body}).then(setData).catch(reason=>setError(reason instanceof Error?reason.message:"Unable to load supplier performance")).finally(()=>setLoading(false));},[filters.supplier,filters.material,filters.from,filters.to]);
+    [loading,setLoading]=useState(false),[error,setError]=useState(""),[drillState,setDrillState]=useState("REJECTED"),
+    [trendAttribute,setTrendAttribute]=useState<any>(null),[trendSeries,setTrendSeries]=useState<any>(null),[trendLoading,setTrendLoading]=useState(false),[trendTab,setTrendTab]=useState("CHART");
+  useEffect(()=>{const params=new URLSearchParams();if(filters.supplier)params.set("supplier_id",filters.supplier);if(filters.material)params.set("material_id",filters.material);if(filters.from)params.set("date_from",filters.from);if(filters.to)params.set("date_to",filters.to);setLoading(true);setError("");apiFetch(API+`/reports/supplier-performance?${params}`).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to load supplier performance");return body}).then(setData).catch(reason=>setError(reason instanceof Error?reason.message:"Unable to load supplier performance")).finally(()=>setLoading(false));},[filters.supplier,filters.material,filters.from,filters.to]);
   const summary=data.summary,total=summary.total||0;
   const value=(count:number)=>display==="PERCENT"?`${total?((count/total)*100).toFixed(1):"0.0"}%`:count.toLocaleString();
   const contributors=data.attribute_contributors.filter((row:any)=>row.quality_state===drillState);
+  const openAttributeTrend=async(row:any)=>{setTrendAttribute(row);setTrendSeries(null);setTrendTab("CHART");setTrendLoading(true);const params=new URLSearchParams({attribute_id:row.attribute_id});if(filters.supplier)params.set("supplier_id",filters.supplier);if(filters.material)params.set("material_id",filters.material);if(filters.from)params.set("date_from",filters.from);if(filters.to)params.set("date_to",filters.to);try{const response=await apiFetch(API+`/reports/supplier-performance/attribute-trend?${params}`);const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to load attribute trend");setTrendSeries(body);}catch(reason){setError(reason instanceof Error?reason.message:"Unable to load attribute trend");setTrendAttribute(null);}finally{setTrendLoading(false)}};
   return <>
     <section className="panel supplierPerformanceHero"><div className="panelTitle"><div><span className="eyebrow">EXECUTIVE QUALITY INSIGHT</span><h2>Supplier Performance</h2><p className="muted">Receipt quality outcomes by supplier, material and contributing exception attribute.</p></div><div className="metricSwitch"><button className={display==="ABSOLUTE"?"active":""} onClick={()=>setDisplay("ABSOLUTE")}>Absolute</button><button className={display==="PERCENT"?"active":""} onClick={()=>setDisplay("PERCENT")}>Percentage</button></div></div>
       <div className="performanceFilters"><label>Supplier<select value={filters.supplier} onChange={event=>setFilters({...filters,supplier:event.target.value})}><option value="">All suppliers</option>{suppliers.map((row:any)=><option key={row.id} value={row.id}>{row.supplier_code} · {row.supplier_name}</option>)}</select></label><label>Material<select value={filters.material} onChange={event=>setFilters({...filters,material:event.target.value})}><option value="">All materials</option>{materials.map((row:any)=><option key={row.id} value={row.id}>{row.material_code} · {row.material_name}</option>)}</select></label><label>Receipt From<input type="date" value={filters.from} onChange={event=>setFilters({...filters,from:event.target.value})}/></label><label>Receipt To<input type="date" min={filters.from} value={filters.to} onChange={event=>setFilters({...filters,to:event.target.value})}/></label><button onClick={()=>setFilters({supplier:"",material:"",from:"",to:""})}>Clear</button></div>
@@ -1455,11 +1526,12 @@ function SupplierPerformanceReport({ materials, suppliers }: any) {
     <div className="performanceLegend">{PERFORMANCE_STATES.map(([state,label])=><span key={state}><i className={state.toLowerCase()}/>{label}</span>)}</div>
     <div className="performanceSplit"><PerformanceBreakdown title="Supplier-wise Performance" rows={data.by_supplier} display={display}/><PerformanceBreakdown title="Material-wise Performance" rows={data.by_material} display={display}/></div>
     <section className="panel contributorPanel"><div className="panelTitle"><div><h2>Exception Attribute Drill-down</h2><p className="muted">Failed attributes contributing to rejected or deviation-accepted receipts.</p></div><div className="metricSwitch"><button className={drillState==="REJECTED"?"active":""} onClick={()=>setDrillState("REJECTED")}>Rejected</button><button className={drillState==="ACCEPTED_WITH_DEVIATION"?"active":""} onClick={()=>setDrillState("ACCEPTED_WITH_DEVIATION")}>Accepted with Deviation</button></div></div>
-      <div className="contributorChart">{contributors.slice(0,12).map((row:any)=>{const max=Math.max(...contributors.map((item:any)=>item.receipt_count),1);return <div className="contributorRow" key={`${row.attribute_id}-${row.quality_state}`}><span><b>{row.attribute_code}</b> · {row.attribute_name}</span><div><i style={{width:`${(row.receipt_count/max)*100}%`}}/><strong>{row.receipt_count}</strong></div></div>})}</div>
+      <div className="contributorChart">{contributors.slice(0,12).map((row:any)=>{const max=Math.max(...contributors.map((item:any)=>item.receipt_count),1);return <div className="contributorRow" key={`${row.attribute_id}-${row.quality_state}`} onContextMenu={event=>{event.preventDefault();openAttributeTrend(row)}} title="Right-click for SPC / SQC trend"><span><b>{row.attribute_code}</b> · {row.attribute_name}</span><div><i style={{width:`${(row.receipt_count/max)*100}%`}}/><strong>{row.receipt_count}</strong></div></div>})}</div>
       <DataGrid rows={contributors} searchText={(row)=>`${row.attribute_code} ${row.attribute_name} ${row.quality_state}`} sortOptions={[["Attribute",(row)=>row.attribute_name],["Affected receipts",(row)=>row.receipt_count],["Failed results",(row)=>row.failed_result_count]]} exportName={`supplier-performance-${drillState.toLowerCase()}`}>
-      {(gridRows)=><div className="tablewrap"><table><thead><tr><th>Attribute</th><th>Quality State</th><th>Affected Receipts</th><th>Failed Results</th><th>Share of Outcome</th></tr></thead><tbody>{gridRows.map((row:any)=><tr key={`${row.attribute_id}-${row.quality_state}`}><td><b>{row.attribute_code}</b><br/><small>{row.attribute_name}</small></td><td><Badge>{row.quality_state}</Badge></td><td>{row.receipt_count}</td><td>{row.failed_result_count}</td><td>{(summary[drillState]||0)?((row.receipt_count/summary[drillState])*100).toFixed(1):"0.0"}%</td></tr>)}</tbody></table>{!gridRows.length&&<div className="empty">No failed attributes contributed to this outcome in the selected period.</div>}</div>}
+      {(gridRows)=><div className="tablewrap"><table><thead><tr><th>Attribute</th><th>Quality State</th><th>Affected Receipts</th><th>Failed Results</th><th>Share of Outcome</th></tr></thead><tbody>{gridRows.map((row:any)=><tr key={`${row.attribute_id}-${row.quality_state}`} onContextMenu={event=>{event.preventDefault();openAttributeTrend(row)}} title="Right-click for SPC / SQC trend"><td><b>{row.attribute_code}</b><br/><small>{row.attribute_name}</small></td><td><Badge>{row.quality_state}</Badge></td><td>{row.receipt_count}</td><td>{row.failed_result_count}</td><td>{(summary[drillState]||0)?((row.receipt_count/summary[drillState])*100).toFixed(1):"0.0"}%</td></tr>)}</tbody></table>{!gridRows.length&&<div className="empty">No failed attributes contributed to this outcome in the selected period.</div>}</div>}
       </DataGrid>
     </section>
+    {trendAttribute&&<div className="modalBackdrop" onClick={()=>setTrendAttribute(null)}><div className="analysisModal performanceTrendModal" onClick={event=>event.stopPropagation()}><div className="panelTitle"><div><span className="eyebrow">SUPPLIER PERFORMANCE · SPC / SQC</span><h2>{trendAttribute.attribute_code} · {trendAttribute.attribute_name}</h2><p className="muted">Filtered supplier, material and receipt-date population</p></div><button onClick={()=>setTrendAttribute(null)}>×</button></div>{trendLoading?<div className="empty">Loading SPC / SQC trend…</div>:trendSeries?.points?.length?<><div className="configTabs performanceTrendTabs"><button className={trendTab==="CHART"?"active":""} onClick={()=>setTrendTab("CHART")}>SPC / SQC Chart</button><button className={trendTab==="WESTERN"?"active":""} onClick={()=>setTrendTab("WESTERN")}>Western Electric Rules</button></div>{trendTab==="WESTERN"?<WesternElectricPanel series={[trendSeries]}/>:<section className="analysisChartCard"><div className="analysisChartTitle"><div><h3>{trendSeries.code} · {trendSeries.name}</h3><small>{trendSeries.stats.count} observations · {trendSeries.uom||"No UOM"}</small></div><div className="spcStats"><span>Mean<b>{trendSeries.stats.mean?.toFixed(3)??"—"}</b></span><span>Sigma<b>{trendSeries.stats.sigma?.toFixed(3)??"—"}</b></span><span>LCL / UCL<b>{trendSeries.stats.lcl?.toFixed(3)??"—"} / {trendSeries.stats.ucl?.toFixed(3)??"—"}</b></span><span>Cpk<b>{trendSeries.stats.cpk?.toFixed(2)??"—"}</b></span></div></div><AnalysisTrendChart series={trendSeries} selectedReference="" spc={true}/></section>}</>:<div className="empty">No numerical results are available for this attribute.</div>}</div></div>}
   </>;
 }
 
@@ -1485,7 +1557,7 @@ function MaterialQualityReport({ openReceipt, materials, suppliers }: any) {
     if (filters.to) params.set("date_to", filters.to);
     if (filters.search.trim()) params.set("search", filters.search.trim());
     setLoading(true);
-    fetch(API + `/reports/material-quality-register?${params}`)
+    apiFetch(API + `/reports/material-quality-register?${params}`)
       .then((r) => r.json())
       .then(setRows)
       .finally(() => setLoading(false));
@@ -1946,7 +2018,7 @@ function AttentionPage({ notify }: any) {
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
   const [reportData, setReportData] = useState<any>(null);
   const [evaluating, setEvaluating] = useState(false);
-  const get = async (path: string) => (await fetch(API + path)).json();
+  const get = async (path: string) => (await apiFetch(API + path)).json();
   const load = async () => {
     setSummary(await get(`/attention/summary?view=${view}`));
     setEvents(await get("/attention/events"));
@@ -1960,7 +2032,7 @@ function AttentionPage({ notify }: any) {
     setEvaluating(true);
     notify("Attention rule evaluation is running. The large demo dataset may take several seconds.");
     try {
-      const r = await fetch(API + "/attention/evaluate", { method: "POST" });
+      const r = await apiFetch(API + "/attention/evaluate", { method: "POST" });
       const d = await r.json();
       notify(r.ok ? `Attention evaluation complete: ${d.observations_used.toLocaleString()} observations, ${d.events_created.toLocaleString()} new events.` : d.detail || "Evaluation failed");
       if (r.ok) await load();
@@ -1971,7 +2043,7 @@ function AttentionPage({ notify }: any) {
     }
   };
   const saveConfig = async () => {
-    const r = await fetch(API + "/attention/config", {
+    const r = await apiFetch(API + "/attention/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1987,7 +2059,7 @@ function AttentionPage({ notify }: any) {
     if (r.ok) load();
   };
   const acknowledge = async (id: string) => {
-    await fetch(API + `/attention/events/${id}/acknowledge`, {
+    await apiFetch(API + `/attention/events/${id}/acknowledge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ acknowledged_by: "Quality User" }),
@@ -2560,7 +2632,7 @@ function ConfigPage({ notify, refreshApp }: any) {
   const [newSpecOpen, setNewSpecOpen] = useState(false),
     [newSpecMaterialId, setNewSpecMaterialId] = useState(""),
     [latestSpec, setLatestSpec] = useState<any>(null);
-  const get = async (p: string) => (await fetch(API + p)).json();
+  const get = async (p: string) => (await apiFetch(API + p)).json();
   const reload = async () => {
     setMats(await get("/config/materials"));
     setSups(await get("/config/suppliers"));
@@ -2577,7 +2649,7 @@ function ConfigPage({ notify, refreshApp }: any) {
     reload();
   }, []);
   const post = async (path: string, body: any) => {
-    const r = await fetch(API + path, {
+    const r = await apiFetch(API + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -2596,7 +2668,7 @@ function ConfigPage({ notify, refreshApp }: any) {
       "Reset all master data?\n\nPlant locations, materials, suppliers, quality attributes and specification sheets will be cleared from configuration and new transactions. Existing receipt and quality transactions will remain unchanged. This action cannot be undone from the UI.",
     );
     if (!confirmed) return;
-    const response = await fetch(API + "/config/reset-masters", {
+    const response = await apiFetch(API + "/config/reset-masters", {
       method: "POST",
     });
     const data = await response.json();
@@ -2621,7 +2693,7 @@ function ConfigPage({ notify, refreshApp }: any) {
       "Reset the entire application?\n\nThis permanently deletes ALL master data, specifications, receipts, samples, quality results, dispositions, attention events, configuration and audit history. This cannot be undone.",
     );
     if (!confirmed) return;
-    const response = await fetch(API + "/config/reset-app", { method: "POST" });
+    const response = await apiFetch(API + "/config/reset-app", { method: "POST" });
     const data = await response.json();
     if (!response.ok) {
       notify(data.detail || "Application reset failed");
@@ -2639,7 +2711,7 @@ function ConfigPage({ notify, refreshApp }: any) {
     if (!confirmed) return;
     setDemoLoading(true);
     try {
-      const response = await fetch(API + "/config/load-demo", { method: "POST" });
+      const response = await apiFetch(API + "/config/load-demo", { method: "POST" });
       const data = await response.json();
       if (!response.ok) {
         notify(data.detail || "Demo data generation failed");
@@ -2751,7 +2823,7 @@ function ConfigPage({ notify, refreshApp }: any) {
     setNewSpecMaterialId(materialId);
     setLatestSpec(null);
     if (!materialId) return;
-    const r = await fetch(API + `/config/specifications/latest/${materialId}`);
+    const r = await apiFetch(API + `/config/specifications/latest/${materialId}`);
     const d = await r.json();
     if (!r.ok) {
       notify(d.detail || "Unable to find latest specification");
@@ -2901,6 +2973,7 @@ function ConfigPage({ notify, refreshApp }: any) {
               ["materials", "Material"],
               ["suppliers", "Supplier"],
               ["attributes", "Quality Attributes"],
+              ["data", "Data Management"],
             ].map(([k, l]) => (
               <button
                 key={k}
@@ -2910,38 +2983,20 @@ function ConfigPage({ notify, refreshApp }: any) {
                 {l}
               </button>
             ))}
-            <div className="masterResetArea">
-              <button
-                type="button"
-                className="dangerAction masterResetButton"
-                onClick={resetMasters}
-              >
-                Reset Master Data
-              </button>
-              <small>Transactions are preserved.</small>
-              <div className="appDataActions">
-                <button
-                  type="button"
-                  className="demoAction"
-                  disabled={demoLoading}
-                  onClick={loadDemo}
-                >
-                  {demoLoading ? "Generating Demo…" : "Load Demo Data"}
-                </button>
-                <button
-                  type="button"
-                  className="dangerAction masterResetButton"
-                  disabled={demoLoading}
-                  onClick={resetApp}
-                >
-                  Reset Entire App
-                </button>
-              </div>
-              <small>These actions replace or delete transactions.</small>
-            </div>
           </nav>
         )}
         <div className="configSection">
+          {section === "data" && (
+            <section className="panel dataManagementPanel">
+              <div className="panelTitle"><div><span className="eyebrow">CONTROLLED ADMINISTRATION</span><h2>Application Data Management</h2><p className="muted">Run high-impact maintenance operations from one controlled workspace. User accounts and access groups are preserved by all three operations.</p></div><Badge>ADMIN ONLY</Badge></div>
+              <div className="dataManagementGrid">
+                <article className="dataActionCard masterDataAction"><div className="dataActionIcon">M</div><div><h3>Reset Master Data</h3><p>Archives current plants, SMS/store locations, materials, suppliers, quality attributes and specifications.</p><ul><li>Receipt and laboratory transactions remain intact</li><li>Historical transaction references remain available</li><li>New transactions require fresh master configuration</li></ul></div><button type="button" className="dangerAction" disabled={demoLoading} onClick={resetMasters}>Reset Master Data</button></article>
+                <article className="dataActionCard demoDataAction"><div className="dataActionIcon">D</div><div><h3>Load Demonstration Data</h3><p>Replaces operational data with a deterministic ferro-alloy demonstration environment.</p><ul><li>8 ferro-alloy materials and 12 suppliers</li><li>50,100 completed receipt samples</li><li>Approximately 250,500 quality results</li></ul></div><button type="button" className="primary" disabled={demoLoading} onClick={loadDemo}>{demoLoading?"Generating Demo Data…":"Load Demo Data"}</button></article>
+                <article className="dataActionCard resetAppAction"><div className="dataActionIcon">!</div><div><h3>Reset Entire Application</h3><p>Permanently removes all operational master, transaction, quality, attention and audit data.</p><ul><li>User accounts and permissions are preserved</li><li>All receipt and result history is deleted</li><li>This operation cannot be undone</li></ul></div><button type="button" className="dangerAction" disabled={demoLoading} onClick={resetApp}>Reset Entire App</button></article>
+              </div>
+              <div className="dataSafetyNote"><b>Safety control</b><span>Every action requires confirmation immediately before execution. Demo generation and full reset are mutually locked while processing.</span></div>
+            </section>
+          )}
           {section === "locations" && (
             <>
               <section className="panel">
@@ -3678,7 +3733,7 @@ function ConfigPage({ notify, refreshApp }: any) {
                               )
                             )
                               return;
-                            const r = await fetch(
+                            const r = await apiFetch(
                               API + `/config/suppliers/${s.id}/status`,
                               {
                                 method: "PATCH",
@@ -4102,7 +4157,7 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
                   <button onClick={() => openTests(sample)}>
                     Open Laboratory Workbench
                   </button>
-                  <button className="comparisonAction" onClick={async () => { const response = await fetch(API + `/samples/${sample.id}/required-tests`); if (response.ok) setComparisonTests(await response.json()); setComparisonOpen(true); }}>
+                  <button className="comparisonAction" onClick={async () => { const response = await apiFetch(API + `/samples/${sample.id}/required-tests`); if (response.ok) setComparisonTests(await response.json()); setComparisonOpen(true); }}>
                     Specification vs Actual
                   </button>
                 </>
