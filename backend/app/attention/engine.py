@@ -109,7 +109,8 @@ def numeric_signals(history, config):
         signals.append(("SPEC_FAIL", "CRITICAL", "Result is outside the specification limits", {}))
     tolerance = (current["usl"] - current["lsl"]) if current["usl"] is not None and current["lsl"] is not None else None
     margin = tolerance * float(config.near_spec_margin_value) / 100 if tolerance and config.near_spec_margin_type == "PERCENT_TOLERANCE" else float(config.near_spec_margin_value)
-    if margin and ((current["lsl"] is not None and value <= current["lsl"] + margin) or (current["usl"] is not None and value >= current["usl"] - margin)):
+    inside_spec = (current["lsl"] is None or value >= current["lsl"]) and (current["usl"] is None or value <= current["usl"])
+    if margin and inside_spec and ((current["lsl"] is not None and value <= current["lsl"] + margin) or (current["usl"] is not None and value >= current["usl"] - margin)):
         signals.append(("NEAR_SPEC", "WATCH", "Result is inside the configured near-specification margin", {"margin": margin}))
     baseline = history[max(0, len(history)-config.baseline_window_n-1):-1]
     values = [x["value"] for x in baseline]
@@ -139,16 +140,18 @@ def discrete_signals(history, config):
 
 
 def evaluate(db):
-    config = get_config(db); run = AttentionRunLog(config_version=config.version); db.add(run); db.flush()
+    config = get_config(db); run = AttentionRunLog(config_version=config.version); db.add(run); db.commit(); db.refresh(run)
+    run_id = run.id
     try:
         if not config.enabled:
             run.status="COMPLETED"; run.completed_at=datetime.utcnow(); db.commit()
-            return {"run_id":run.id,"records_scanned":0,"observations_used":0,"events_created":0,"consolidation_audit":[],"message":"Attention Engine is disabled"}
+            return {"run_id":run.id,"records_scanned":0,"observations_used":0,"events_created":0,"consolidation_audit_count":0,"message":"Attention Engine is disabled"}
         raw_rows, observations = build_observations(db, config)
         selected, audit = select_observations(observations, config.test_selection_mode, config.numeric_aggregate_method)
         partitions = defaultdict(list)
         for item in selected: partitions[(item["supplier_id"],item["material_id"],item["attribute_id"])].append(item)
         created = 0; enabled = json.loads(config.rules_json)
+        existing_fingerprints = {value for (value,) in db.query(AttentionEvent.fingerprint).all()}
         for history in partitions.values():
             history.sort(key=lambda x:(x["time"],x["result_id"]))
             for index in range(len(history)):
@@ -158,11 +161,15 @@ def evaluate(db):
                     if not enabled.get(rule, True): continue
                     source_ids=current.get("source_result_ids",[current["result_id"]])
                     fingerprint=hashlib.sha256(f"{config.version}|{rule}|{current['supplier_id']}|{current['material_id']}|{current['attribute_id']}|{current['reference_id']}|{'|'.join(source_ids)}".encode()).hexdigest()
-                    if db.query(AttentionEvent).filter_by(fingerprint=fingerprint).first(): continue
+                    if fingerprint in existing_fingerprints: continue
                     evidence.update({"reference_fields":current["reference_fields"],"source_result_ids":source_ids,"test_selection_mode":config.test_selection_mode})
                     event=AttentionEvent(fingerprint=fingerprint,event_time=current["time"],supplier_id=current["supplier_id"],material_id=current["material_id"],attribute_id=current["attribute_id"],reference_id=current["reference_id"],receipt_id=current["receipt_id"],sample_id=current["sample_id"],test_result_id=current["result_id"],specification_id=current["specification_id"],rule_code=rule,severity=severity,observed_value=str(current["value"]),message=message,lsl=current["lsl"],usl=current["usl"],target_value=current["target"],baseline_mean=stats["mean"] if stats else None,baseline_sigma=stats["sigma"] if stats else None,baseline_n=stats["n"] if stats else len(series)-1,config_version=config.version,rule_evidence_json=json.dumps(evidence))
-                    db.add(event); created += 1
+                    db.add(event); existing_fingerprints.add(fingerprint); created += 1
         run.status="COMPLETED"; run.completed_at=datetime.utcnow(); run.records_scanned=len(raw_rows); run.observations_used=len(selected); run.events_created=created
-        db.commit(); return {"run_id":run.id,"records_scanned":len(raw_rows),"observations_used":len(selected),"events_created":created,"consolidation_audit":audit}
+        db.commit(); return {"run_id":run.id,"records_scanned":len(raw_rows),"observations_used":len(selected),"events_created":created,"consolidation_audit_count":len(audit)}
     except Exception as exc:
-        run.status="FAILED"; run.completed_at=datetime.utcnow(); run.error_text=str(exc); db.commit(); raise
+        db.rollback()
+        failed_run = db.get(AttentionRunLog, run_id)
+        if failed_run:
+            failed_run.status="FAILED"; failed_run.completed_at=datetime.utcnow(); failed_run.error_text=str(exc); db.commit()
+        raise

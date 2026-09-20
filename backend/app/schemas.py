@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
+from typing import Optional
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 class ORM(BaseModel):
@@ -62,7 +65,7 @@ class StoreLocationCreate(BaseModel):
 class AttributeGroupCreate(BaseModel):
     group_code: str
     group_name: str
-    description: str | None = None
+    description: Optional[str] = None
     active: bool = True
 
     @field_validator("group_code", "group_name")
@@ -76,10 +79,10 @@ class QualityAttributeCreate(BaseModel):
     group_id: str
     attribute_code: str
     attribute_name: str
-    uom: str | None = None
+    uom: Optional[str] = None
     data_type: str = "NUMERIC"
     precision_scale: int = 3
-    test_method: str | None = None
+    test_method: Optional[str] = None
     category_options: list[str] = []
     active: bool = True
 
@@ -105,10 +108,10 @@ class QualityAttributeCreate(BaseModel):
 class SpecAttributeIn(BaseModel):
     attribute_id: str
     mandatory: bool = True
-    lsl: Decimal | None = None
-    usl: Decimal | None = None
-    aim_value: Decimal | None = None
-    target_value: str | None = None
+    lsl: Optional[Decimal] = None
+    usl: Optional[Decimal] = None
+    aim_value: Optional[Decimal] = None
+    target_value: Optional[str] = None
     display_sequence: int = 1
 
     @model_validator(mode="after")
@@ -123,10 +126,10 @@ class SpecAttributeIn(BaseModel):
 
 class SpecificationCreate(BaseModel):
     material_id: str
-    version: str | None = None
-    status: str | None = None
-    effective_from: datetime | None = None
-    effective_to: datetime | None = None
+    version: Optional[str] = None
+    status: Optional[str] = None
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
     attributes: list[SpecAttributeIn]
 
     @model_validator(mode="after")
@@ -146,12 +149,12 @@ class ReceiptCreate(BaseModel):
     supplier_batch_no: str
     internal_batch_no: str
     po_no: str
-    grn_no: str | None = None
-    vehicle_no: str | None = None
+    grn_no: Optional[str] = None
+    vehicle_no: Optional[str] = None
     quantity: Decimal
     uom: str = "MT"
-    receipt_datetime: datetime | None = None
-    remarks: str | None = None
+    receipt_datetime: Optional[datetime] = None
+    remarks: Optional[str] = None
 
 class ReceiptOut(ORM):
     id: str
@@ -173,13 +176,13 @@ class SampleCreate(BaseModel):
     sample_type: str = "INITIAL"
     sampling_location: str = "Ferro Alloy Store"
     sampling_method: str = "Composite"
-    remarks: str | None = None
+    remarks: Optional[str] = None
 
 class ResultIn(BaseModel):
     specification_attribute_id: str
-    numeric_result: Decimal | None = None
-    text_result: str | None = None
+    numeric_result: Optional[Decimal] = None
+    text_result: Optional[str] = None
 
 class DispositionIn(BaseModel):
     disposition: str
-    reason_text: str | None = None
+    reason_text: Optional[str] = None

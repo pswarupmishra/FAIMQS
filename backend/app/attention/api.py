@@ -1,6 +1,8 @@
 import json
 from collections import defaultdict
 from datetime import datetime
+from threading import Lock
+from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
@@ -10,6 +12,7 @@ from ..models import AttentionConfigAudit, AttentionEvent, AttentionRunLog, Rece
 from .engine import REFERENCE_FIELDS, SEVERITY_RANK, config_dict, evaluate, get_config
 
 router = APIRouter(prefix="/api/v1/attention", tags=["attention"])
+evaluation_lock = Lock()
 
 def event_dict(event):
     return {"id":event.id,"event_time":event.event_time,"supplier_id":event.supplier_id,"supplier_code":event.supplier.supplier_code,"supplier_name":event.supplier.supplier_name,"material_id":event.material_id,"material_code":event.material.material_code,"material_name":event.material.material_name,"attribute_id":event.attribute_id,"attribute_code":event.attribute.attribute_code,"attribute_name":event.attribute.attribute_name,"data_type":event.attribute.data_type,"reference_id":event.reference_id,"receipt_id":event.receipt_id,"sample_id":event.sample_id,"test_result_id":event.test_result_id,"specification_id":event.specification_id,"rule_code":event.rule_code,"severity":event.severity,"status":event.status,"observed_value":event.observed_value,"message":event.message,"lsl":float(event.lsl) if event.lsl is not None else None,"usl":float(event.usl) if event.usl is not None else None,"target_value":event.target_value,"baseline_mean":float(event.baseline_mean) if event.baseline_mean is not None else None,"baseline_sigma":float(event.baseline_sigma) if event.baseline_sigma is not None else None,"baseline_n":event.baseline_n,"config_version":event.config_version,"evidence":json.loads(event.rule_evidence_json),"acknowledged_at":event.acknowledged_at,"acknowledged_by":event.acknowledged_by}
@@ -52,14 +55,20 @@ def reference_preview(payload:dict=Body(...),db:Session=Depends(get_db)):
     return {"fields":fields,"records":len(rows),"distinct_references":len(counts),"blank_component_count":blank,"duplicate_records":sum(len(v)-1 for v in counts.values() if len(v)>1),"cross_supplier_material_collisions":collisions,"multi_receipt_references":sum(1 for v in counts.values() if len(v)>1)}
 
 @router.post("/evaluate")
-def run_evaluation(db:Session=Depends(get_db)): return evaluate(db)
+def run_evaluation(db:Session=Depends(get_db)):
+    if not evaluation_lock.acquire(blocking=False):
+        raise HTTPException(409,"An attention rule evaluation is already running")
+    try:
+        return evaluate(db)
+    finally:
+        evaluation_lock.release()
 
 @router.get("/events")
-def events(material_id:str|None=None,supplier_id:str|None=None,attribute_id:str|None=None,severity:str|None=None,status:str|None=None,db:Session=Depends(get_db)):
+def events(material_id:Optional[str]=None,supplier_id:Optional[str]=None,attribute_id:Optional[str]=None,severity:Optional[str]=None,status:Optional[str]=None,limit:int=Query(500,ge=1,le=5000),db:Session=Depends(get_db)):
     q=event_query(db)
     for column,value in [(AttentionEvent.material_id,material_id),(AttentionEvent.supplier_id,supplier_id),(AttentionEvent.attribute_id,attribute_id),(AttentionEvent.severity,severity),(AttentionEvent.status,status)]:
         if value: q=q.filter(column==value)
-    return [event_dict(x) for x in q.order_by(AttentionEvent.event_time.desc()).all()]
+    return [event_dict(x) for x in q.order_by(AttentionEvent.event_time.desc()).limit(limit).all()]
 
 @router.get("/events/{event_id}")
 def event_detail(event_id:str,db:Session=Depends(get_db)):

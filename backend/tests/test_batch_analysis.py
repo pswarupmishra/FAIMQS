@@ -39,7 +39,25 @@ class BatchAnalysisTests(unittest.TestCase):
         self.db.close()
 
     def analyze(self, policy):
-        return batch_analysis("supplier_batch_no", policy, None, None, None, self.db)
+        return batch_analysis(
+            reference_fields="supplier_batch_no", consolidation=policy, db=self.db,
+        )
+
+    def test_summary_can_skip_large_series_payload(self):
+        data = batch_analysis(
+            reference_fields="supplier_batch_no", consolidation="ALL",
+            include_series=False, db=self.db,
+        )
+        self.assertEqual(1, len(data["batches"]))
+        self.assertEqual([], data["series"])
+
+    def test_selected_reference_only_returns_its_series(self):
+        data = batch_analysis(
+            reference_fields="supplier_batch_no", consolidation="ALL",
+            selected_reference="LOT-1", db=self.db,
+        )
+        self.assertEqual(["LOT-1"], [batch["reference_id"] for batch in data["batches"]])
+        self.assertEqual(2, len(data["series"][0]["points"]))
 
     def test_all_keeps_every_observation(self):
         data = self.analyze("ALL")

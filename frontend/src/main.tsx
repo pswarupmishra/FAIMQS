@@ -100,6 +100,7 @@ function App() {
   const [tab, setTab] = useState("dashboard"),
     [dash, setDash] = useState<AnyObj>({}),
     [receipts, setReceipts] = useState<any[]>([]),
+    [blockedReceipts, setBlockedReceipts] = useState<any[]>([]),
     [materials, setMaterials] = useState<any[]>([]),
     [suppliers, setSuppliers] = useState<any[]>([]),
     [plants, setPlants] = useState<any[]>([]),
@@ -130,6 +131,7 @@ function App() {
   const load = async () => {
     setDash(await get("/dashboard"));
     setReceipts(await get("/receipts"));
+    setBlockedReceipts(await get("/receipts?release_state=BLOCKED&limit=5000"));
     setMaterials(await get("/materials"));
     setSuppliers(await get("/suppliers"));
     setPlants(await get("/config/plants"));
@@ -289,15 +291,19 @@ function App() {
           </>
         )}
         {tab === "receipts" && (
-          <section className="panel">
-            <div className="panelTitle">
-              <h2>Material Quality Register</h2>
-              <button className="primary" onClick={() => setTab("new")}>
-                + New Receipt
-              </button>
-            </div>
-            <ReceiptTable rows={receipts} open={openReceipt} />
-          </section>
+          <>
+            <section className="panel blockedReceiptPanel">
+              <div className="panelTitle">
+                <div><h2>Blocked Batches</h2><p className="muted">Batches awaiting sampling, laboratory completion, quality review, or another release decision.</p></div>
+                <div className="panelTitleActions"><Badge>{blockedReceipts.length} BLOCKED</Badge><button className="primary" onClick={() => setTab("new")}>+ New Receipt</button></div>
+              </div>
+              <ReceiptTable rows={blockedReceipts} open={openReceipt} emptyText="No batches are currently blocked." />
+            </section>
+            <section className="panel">
+              <div className="panelTitle"><div><h2>Material Receipt Register</h2><p className="muted">Complete register of incoming material receipts and their current quality status.</p></div></div>
+              <ReceiptTable rows={receipts} open={openReceipt} />
+            </section>
+          </>
         )}
         {tab === "new" && (
           <section className="panel formPanel">
@@ -480,7 +486,7 @@ function App() {
           <AnalysisPage materials={materials} suppliers={suppliers} notify={setMsg} />
         )}
         {tab === "report" && (
-          <MaterialQualityReport openReceipt={openReceipt} />
+          <MaterialQualityReport openReceipt={openReceipt} materials={materials} suppliers={suppliers} />
         )}
         {tab === "docs" && <DocumentationPage />}
       </main>
@@ -1117,13 +1123,68 @@ function AnalysisTrendChart({ series, selectedReference, spc }: any) {
       {points.map((point: any, index: number) => (
         <g key={`${point.reference_id}-${point.receipt_id}-${index}`}>
           <circle cx={x(index)} cy={y(Number(point.value))} r={point.reference_id === selectedReference ? 6 : 4} className={point.reference_id === selectedReference ? "trendPoint selected" : "trendPoint"} />
-          <title>{`${point.reference_id}: ${point.value} ${series.uom || ""}`}</title>
+          <title>{[
+            `Supplier: ${point.supplier_code || "—"} · ${point.supplier_name || "—"}`,
+            `Material: ${point.material_code || "—"} · ${point.material_name || "—"}`,
+            `Reference: ${point.reference_id} · Receipt: ${point.receipt_no}`,
+            `Attribute: ${series.code} · ${series.name}`,
+            `Specification: ${point.lsl ?? "—"} / Aim ${point.aim ?? "—"} / ${point.usl ?? "—"} ${series.uom || ""}`,
+            `Actual: ${point.value} ${series.uom || ""} · ${point.status || "PENDING"}`,
+          ].join("\n")}</title>
         </g>
       ))}
       <text x={pad} y={height - 7} className="chartAxisText">{points[0]?.reference_id || ""}</text>
       <text x={width - pad} y={height - 7} textAnchor="end" className="chartAxisText">{points[points.length - 1]?.reference_id || ""}</text>
     </svg>
   );
+}
+
+const WESTERN_ELECTRIC_RULES = [
+  ["WE1", "One point beyond 3σ", "A single result is more than three standard deviations from the centre line."],
+  ["WE2", "Two of three beyond 2σ", "Two of three consecutive results are beyond two standard deviations on the same side."],
+  ["WE3", "Four of five beyond 1σ", "Four of five consecutive results are beyond one standard deviation on the same side."],
+  ["WE4", "Eight on one side", "Eight consecutive results are all above or all below the centre line."],
+];
+
+function westernElectricViolations(series: any) {
+  const points = series.points || [], meanValue = series.stats?.mean, sigma = series.stats?.sigma;
+  if (meanValue == null || !sigma || points.length < 2) return [];
+  const z = points.map((point: any) => (Number(point.value) - meanValue) / sigma);
+  const violations: any[] = [];
+  const add = (rule: string, index: number, start: number) => violations.push({
+    rule, index, reference_id: points[index].reference_id, value: points[index].value,
+    z_score: z[index], window: points.slice(start, index + 1).map((point: any) => point.reference_id).join(" → "),
+  });
+  z.forEach((score: number, index: number) => {
+    if (Math.abs(score) > 3) add("WE1", index, index);
+    if (index >= 2) {
+      const window = z.slice(index - 2, index + 1);
+      if (window.filter((value: number) => value > 2).length >= 2 || window.filter((value: number) => value < -2).length >= 2) add("WE2", index, index - 2);
+    }
+    if (index >= 4) {
+      const window = z.slice(index - 4, index + 1);
+      if (window.filter((value: number) => value > 1).length >= 4 || window.filter((value: number) => value < -1).length >= 4) add("WE3", index, index - 4);
+    }
+    if (index >= 7) {
+      const window = z.slice(index - 7, index + 1);
+      if (window.every((value: number) => value > 0) || window.every((value: number) => value < 0)) add("WE4", index, index - 7);
+    }
+  });
+  return violations;
+}
+
+function WesternElectricPanel({ series }: any) {
+  const rows = series.flatMap((item: any) => westernElectricViolations(item).map((violation: any) => ({ ...violation, code: item.code, name: item.name, uom: item.uom })));
+  return <>
+    <div className="weRuleCards">{WESTERN_ELECTRIC_RULES.map(([code, title, description]) => {
+      const count = rows.filter((row: any) => row.rule === code).length;
+      return <section className={count ? "weRuleCard alert" : "weRuleCard"} key={code}><Badge>{code}</Badge><strong>{title}</strong><span>{description}</span><b>{count} violation{count === 1 ? "" : "s"}</b></section>;
+    })}</div>
+    <section className="analysisChartCard">
+      <div className="panelTitle"><div><h3>Detected Rule Violations</h3><p className="muted">Rules are evaluated chronologically for each numerical attribute using the displayed population mean and sigma.</p></div><Badge>{rows.length} SIGNALS</Badge></div>
+      <div className="tablewrap"><table><thead><tr><th>Rule</th><th>Attribute</th><th>Reference</th><th>Value</th><th>Z-score</th><th>Evaluation Window</th></tr></thead><tbody>{rows.map((row: any, index: number) => <tr key={`${row.code}-${row.rule}-${row.index}-${index}`}><td><Badge>{row.rule}</Badge></td><td><b>{row.code}</b><br/><small>{row.name}</small></td><td>{row.reference_id}</td><td>{Number(row.value).toFixed(3)} {row.uom}</td><td>{row.z_score.toFixed(2)}σ</td><td><small>{row.window}</small></td></tr>)}</tbody></table>{!rows.length && <div className="empty">No Western Electric rule violations were detected in the selected population.</div>}</div>
+    </section>
+  </>;
 }
 
 function AnalysisPage({ materials, suppliers, notify }: any) {
@@ -1133,33 +1194,62 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
     [data, setData] = useState<any>({ batches: [], series: [] }),
     [loading, setLoading] = useState(false),
     [selectedBatch, setSelectedBatch] = useState<any>(null),
+    [detailSeries, setDetailSeries] = useState<any[]>([]),
+    [detailLoading, setDetailLoading] = useState(false),
     [analysisMode, setAnalysisMode] = useState("TREND"),
+    [spcTab, setSpcTab] = useState("CHARTS"),
     [contextMenu, setContextMenu] = useState<any>(null);
   const loadAnalysis = async () => {
     setLoading(true);
     const params = new URLSearchParams({
       reference_fields: referenceFields.join(","),
       consolidation,
+      include_series: "false",
     });
     if (filters.supplier_id) params.set("supplier_id", filters.supplier_id);
     if (filters.material_id) params.set("material_id", filters.material_id);
     if (filters.search.trim()) params.set("search", filters.search.trim());
-    const response = await fetch(API + `/analysis/batches?${params}`);
-    const body = await response.json();
-    setLoading(false);
-    if (!response.ok) {
-      notify(body.detail || "Unable to load batch analysis");
-      return;
+    try {
+      const response = await fetch(API + `/analysis/batches?${params}`);
+      const body = await response.json();
+      if (!response.ok) {
+        notify(body.detail || "Unable to load batch analysis");
+        return;
+      }
+      setData(body);
+    } catch {
+      notify("Unable to load batch analysis. Check that the backend service is running.");
+    } finally {
+      setLoading(false);
     }
-    setData(body);
   };
   useEffect(() => {
     loadAnalysis();
   }, [referenceFields.join("|"), consolidation]);
-  const openAnalysis = (batch: any, mode: string) => {
+  const openAnalysis = async (batch: any, mode: string) => {
     setSelectedBatch(batch);
     setAnalysisMode(mode);
+    setSpcTab("CHARTS");
     setContextMenu(null);
+    setDetailSeries([]);
+    setDetailLoading(true);
+    const params = new URLSearchParams({
+      reference_fields: referenceFields.join(","), consolidation,
+      selected_reference: batch.reference_id, include_series: "true",
+    });
+    if (filters.supplier_id) params.set("supplier_id", filters.supplier_id);
+    if (filters.material_id) params.set("material_id", filters.material_id);
+    if (filters.search.trim()) params.set("search", filters.search.trim());
+    try {
+      const response = await fetch(API + `/analysis/batches?${params}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || "Unable to load analysis detail");
+      setDetailSeries(body.series || []);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load analysis detail");
+    } finally {
+      setDetailLoading(false);
+    }
   };
   return (
     <>
@@ -1219,6 +1309,7 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
       </section>
       <section className="panel">
         <div className="panelTitle"><div><h2>Matching Batch References</h2><p className="muted">Grouped by {referenceFields.map((field) => ANALYSIS_REFERENCE_OPTIONS.find((item) => item[0] === field)?.[1]).join(" + ")} · {consolidation}</p></div></div>
+        {data.truncated && <div className="groupNotice">Showing references from the latest {data.loaded_receipts.toLocaleString()} of {data.total_receipts.toLocaleString()} matching receipts. Use supplier, material, or receipt-attribute filters to narrow the analysis.</div>}
         <DataGrid rows={data.batches} searchText={(batch) => `${batch.reference_id} ${batch.latest_receipt_no} ${batch.supplier_code} ${batch.supplier_name} ${batch.material_code} ${batch.material_name} ${batch.status}`} sortOptions={[["Receipt date", (batch) => batch.receipt_datetime], ["Reference ID", (batch) => batch.reference_id], ["Supplier", (batch) => batch.supplier_name], ["Material", (batch) => batch.material_name], ["Receipt matches", (batch) => batch.receipt_count]]} initialPageSize={25}>
         {(gridRows) =>
         <div className="tablewrap">
@@ -1240,13 +1331,15 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
         <div className="modalBackdrop" onClick={() => setSelectedBatch(null)}>
           <div className="analysisModal" onClick={(event) => event.stopPropagation()}>
             <div className="panelTitle"><div><span className="eyebrow">{analysisMode === "SPC" ? "SPC / SQC ANALYSIS" : "NUMERICAL ATTRIBUTE TRENDS"}</span><h2>{selectedBatch.reference_id}</h2><p className="muted">{selectedBatch.supplier_name} · {selectedBatch.material_name} · {consolidation}</p></div><button type="button" onClick={() => setSelectedBatch(null)}>×</button></div>
-            {!data.series.length && <div className="empty">No numerical test results are available for the matching batches.</div>}
-            <div className="analysisCharts">{data.series.map((series: any) => (
+            {detailLoading && <div className="empty">Loading numerical analysis…</div>}
+            {!detailLoading && !detailSeries.length && <div className="empty">No numerical test results are available for the matching batches.</div>}
+            {analysisMode === "SPC" && !detailLoading && !!detailSeries.length && <div className="configTabs analysisTabs"><button className={spcTab === "CHARTS" ? "active" : ""} onClick={() => setSpcTab("CHARTS")}>SPC / SQC Charts</button><button className={spcTab === "WESTERN_ELECTRIC" ? "active" : ""} onClick={() => setSpcTab("WESTERN_ELECTRIC")}>Western Electric Rules</button></div>}
+            {analysisMode === "SPC" && spcTab === "WESTERN_ELECTRIC" && !detailLoading ? <WesternElectricPanel series={detailSeries} /> : <div className="analysisCharts">{detailSeries.map((series: any) => (
               <section className="analysisChartCard" key={series.attribute_id}>
                 <div className="analysisChartTitle"><div><h3>{series.code} · {series.name}</h3><small>{series.stats.count} consolidated observation{series.stats.count === 1 ? "" : "s"} · {series.uom || "No UOM"}</small></div>{analysisMode === "SPC" && <div className="spcStats"><span>Mean<b>{series.stats.mean?.toFixed(3) ?? "—"}</b></span><span>Sigma<b>{series.stats.sigma?.toFixed(3) ?? "—"}</b></span><span>LCL / UCL<b>{series.stats.lcl?.toFixed(3) ?? "—"} / {series.stats.ucl?.toFixed(3) ?? "—"}</b></span><span>Cpk<b>{series.stats.cpk?.toFixed(2) ?? "—"}</b></span></div>}</div>
                 <AnalysisTrendChart series={series} selectedReference={selectedBatch.reference_id} spc={analysisMode === "SPC"} />
               </section>
-            ))}</div>
+            ))}</div>}
           </div>
         </div>
       )}
@@ -1254,8 +1347,9 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
   );
 }
 
-function MaterialQualityReport({ openReceipt }: any) {
+function MaterialQualityReport({ openReceipt, materials, suppliers }: any) {
   const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState({
     material: "",
     supplier: "",
@@ -1265,29 +1359,19 @@ function MaterialQualityReport({ openReceipt }: any) {
     search: "",
   });
   useEffect(() => {
-    fetch(API + "/reports/material-quality-register")
+    const params = new URLSearchParams({ limit: "1000" });
+    if (filters.material) params.set("material_id", filters.material);
+    if (filters.supplier) params.set("supplier_id", filters.supplier);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.from) params.set("date_from", filters.from);
+    if (filters.to) params.set("date_to", filters.to);
+    if (filters.search.trim()) params.set("search", filters.search.trim());
+    setLoading(true);
+    fetch(API + `/reports/material-quality-register?${params}`)
       .then((r) => r.json())
-      .then(setRows);
-  }, []);
-  const materials = Array.from(
-    new Map(rows.map((x) => [x.material_id, x])).values(),
-  );
-  const suppliers = Array.from(
-    new Map(rows.map((x) => [x.supplier_id, x])).values(),
-  );
-  const filtered = rows.filter((row) => {
-    const date = String(row.receipt_datetime).slice(0, 10);
-    const text =
-      `${row.receipt_no} ${row.supplier_batch_no} ${row.internal_batch_no} ${row.po_no} ${row.grn_no || ""}`.toLowerCase();
-    return (
-      (!filters.material || row.material_id === filters.material) &&
-      (!filters.supplier || row.supplier_id === filters.supplier) &&
-      (!filters.status || row.inspection_status === filters.status) &&
-      (!filters.from || date >= filters.from) &&
-      (!filters.to || date <= filters.to) &&
-      (!filters.search || text.includes(filters.search.toLowerCase()))
-    );
-  });
+      .then(setRows)
+      .finally(() => setLoading(false));
+  }, [filters.material, filters.supplier, filters.status, filters.from, filters.to, filters.search]);
   return (
     <>
       <section className="panel reportFilters">
@@ -1324,8 +1408,8 @@ function MaterialQualityReport({ openReceipt }: any) {
               }
             >
               <option value="">All materials</option>
-              {materials.map((x) => (
-                <option key={x.material_id} value={x.material_id}>
+              {materials.map((x: any) => (
+                <option key={x.id} value={x.id}>
                   {x.material_code} · {x.material_name}
                 </option>
               ))}
@@ -1340,8 +1424,8 @@ function MaterialQualityReport({ openReceipt }: any) {
               }
             >
               <option value="">All suppliers</option>
-              {suppliers.map((x) => (
-                <option key={x.supplier_id} value={x.supplier_id}>
+              {suppliers.map((x: any) => (
+                <option key={x.id} value={x.id}>
                   {x.supplier_code} · {x.supplier_name}
                 </option>
               ))}
@@ -1356,11 +1440,7 @@ function MaterialQualityReport({ openReceipt }: any) {
               }
             >
               <option value="">All statuses</option>
-              {Array.from(new Set(rows.map((x) => x.inspection_status))).map(
-                (x) => (
-                  <option key={x}>{x}</option>
-                ),
-              )}
+              {["DRAFT","PENDING_SAMPLING","SAMPLING_IN_PROGRESS","SAMPLE_SENT_TO_LAB","LAB_IN_PROGRESS","RESULTS_AVAILABLE","UNDER_REVIEW","ACCEPTED","ACCEPTED_WITH_DEVIATION","REJECTED","ON_HOLD"].map((x) => <option key={x} value={x}>{x}</option>)}
             </select>
           </label>
           <label>
@@ -1397,11 +1477,11 @@ function MaterialQualityReport({ openReceipt }: any) {
           <div>
             <h2>Material Quality Register</h2>
             <p className="muted">
-              {filtered.length} of {rows.length} receipt transactions
+              {loading ? "Loading filtered transactions…" : `${rows.length} matching receipt transactions${rows.length === 1000 ? " (first 1,000)" : ""}`}
             </p>
           </div>
         </div>
-        <DataGrid rows={filtered} searchText={(row) => `${row.receipt_no} ${row.material_code} ${row.material_name} ${row.supplier_code} ${row.supplier_name} ${row.supplier_batch_no} ${row.internal_batch_no} ${row.po_no} ${row.grn_no || ""} ${row.inspection_status} ${row.release_state}`} sortOptions={[["Receipt date", (row) => row.receipt_datetime], ["Material", (row) => row.material_name], ["Supplier", (row) => row.supplier_name], ["Quantity", (row) => Number(row.quantity)], ["Quality status", (row) => row.inspection_status]]} initialPageSize={25}>
+        <DataGrid rows={rows} searchText={(row) => `${row.receipt_no} ${row.material_code} ${row.material_name} ${row.supplier_code} ${row.supplier_name} ${row.supplier_batch_no} ${row.internal_batch_no} ${row.po_no} ${row.grn_no || ""} ${row.inspection_status} ${row.release_state}`} sortOptions={[["Receipt date", (row) => row.receipt_datetime], ["Material", (row) => row.material_name], ["Supplier", (row) => row.supplier_name], ["Quantity", (row) => Number(row.quantity)], ["Quality status", (row) => row.inspection_status]]} initialPageSize={25}>
         {(gridRows) =>
         <div className="tablewrap">
           <table>
@@ -1747,6 +1827,7 @@ function AttentionPage({ notify }: any) {
   const [profiler, setProfiler] = useState<any[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
   const [reportData, setReportData] = useState<any>(null);
+  const [evaluating, setEvaluating] = useState(false);
   const get = async (path: string) => (await fetch(API + path)).json();
   const load = async () => {
     setSummary(await get(`/attention/summary?view=${view}`));
@@ -1758,14 +1839,18 @@ function AttentionPage({ notify }: any) {
     load();
   }, [view]);
   const evaluate = async () => {
-    const r = await fetch(API + "/attention/evaluate", { method: "POST" });
-    const d = await r.json();
-    notify(
-      r.ok
-        ? `Attention evaluation complete: ${d.observations_used} observations, ${d.events_created} new events.`
-        : d.detail || "Evaluation failed",
-    );
-    if (r.ok) load();
+    setEvaluating(true);
+    notify("Attention rule evaluation is running. The large demo dataset may take several seconds.");
+    try {
+      const r = await fetch(API + "/attention/evaluate", { method: "POST" });
+      const d = await r.json();
+      notify(r.ok ? `Attention evaluation complete: ${d.observations_used.toLocaleString()} observations, ${d.events_created.toLocaleString()} new events.` : d.detail || "Evaluation failed");
+      if (r.ok) await load();
+    } catch {
+      notify("Attention evaluation could not reach the backend service.");
+    } finally {
+      setEvaluating(false);
+    }
   };
   const saveConfig = async () => {
     const r = await fetch(API + "/attention/config", {
@@ -1824,8 +1909,8 @@ function AttentionPage({ notify }: any) {
                 evaluation and disposition.
               </p>
             </div>
-            <button className="primary" onClick={evaluate}>
-              Run Evaluation
+            <button className="primary" onClick={evaluate} disabled={evaluating}>
+              {evaluating ? "Evaluating Rules…" : "Run Evaluation"}
             </button>
           </section>
           <div className="perspectiveSwitch">
@@ -1917,7 +2002,7 @@ function AttentionPage({ notify }: any) {
           <h2>Attention Event Register</h2>
           <p className="muted">
             Every signal retains its rule, source lineage, specification and
-            configuration version.
+            configuration version. The latest 500 matching events are shown for responsive review.
           </p>
           <DataGrid rows={events} searchText={(event) => `${event.material_code} ${event.attribute_code} ${event.attribute_name} ${event.supplier_name} ${event.reference_id} ${event.rule_code} ${event.severity} ${event.status}`} sortOptions={[["Time", (event) => event.event_time], ["Material", (event) => event.material_code], ["Supplier", (event) => event.supplier_name], ["Severity", (event) => event.severity], ["Status", (event) => event.status]]} initialPageSize={25}>
           {(gridRows) =>
@@ -2220,9 +2305,11 @@ function AttentionPage({ notify }: any) {
 function ReceiptTable({
   rows,
   open,
+  emptyText = "No incoming receipts match the grid filter.",
 }: {
   rows: any[];
   open: (id: string) => void;
+  emptyText?: string;
 }) {
   return (
     <DataGrid
@@ -2277,7 +2364,7 @@ function ReceiptTable({
           ))}
         </tbody>
       </table>
-      {!gridRows.length && <div className="empty">No incoming receipts match the grid filter.</div>}
+      {!gridRows.length && <div className="empty">{emptyText}</div>}
     </div>}
     </DataGrid>
   );
@@ -3774,8 +3861,14 @@ function ConfigPage({ notify, refreshApp }: any) {
   );
 }
 function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
+  const [comparisonOpen, setComparisonOpen] = useState(false),
+    [comparisonTests, setComparisonTests] = useState<any[]>([]),
+    [dispositionRemark, setDispositionRemark] = useState("");
   const sample = r.samples?.[0];
   const resultsLocked = sample?.sample_status !== "TESTING";
+  const qualitySummary = r.quality_summary || { total: 0, pass: 0, fail: 0, pending: 0 };
+  const allWithinSpecification = qualitySummary.total > 0 && qualitySummary.fail === 0 && qualitySummary.pending === 0;
+  const hasDeviation = qualitySummary.fail > 0;
   return (
     <>
       <section className="hero">
@@ -3887,9 +3980,14 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
               ["TESTING", "RESULTS_SUBMITTED", "RESULTS_APPROVED"].includes(
                 sample.sample_status,
               ) && (
-                <button onClick={() => openTests(sample)}>
-                  Open Laboratory Workbench
-                </button>
+                <>
+                  <button onClick={() => openTests(sample)}>
+                    Open Laboratory Workbench
+                  </button>
+                  <button className="comparisonAction" onClick={async () => { const response = await fetch(API + `/samples/${sample.id}/required-tests`); if (response.ok) setComparisonTests(await response.json()); setComparisonOpen(true); }}>
+                    Specification vs Actual
+                  </button>
+                </>
               )}
             {sample?.sample_status === "RESULTS_SUBMITTED" && (
               <button
@@ -3901,11 +3999,18 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
             )}
             {r.status === "UNDER_REVIEW" && (
               <>
+                <label className="dispositionRemark">
+                  Disposition Remarks
+                  <textarea value={dispositionRemark} onChange={(event) => setDispositionRemark(event.target.value)} placeholder="Enter the quality review remarks…" rows={3} />
+                </label>
                 <button
                   className="primary"
+                  disabled={!allWithinSpecification}
+                  title={!allWithinSpecification ? "Accept is available only when all quality results are within specification" : "Accept batch"}
                   onClick={() =>
                     act(`/receipts/${r.id}/disposition`, "POST", {
                       disposition: "ACCEPTED",
+                      reason_text: dispositionRemark.trim() || null,
                     })
                   }
                 >
@@ -3913,32 +4018,32 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
                 </button>
                 <button
                   className="deviationAction"
-                  onClick={() => {
-                    const reason = prompt("Reason for accepting with deviation");
-                    if (reason?.trim())
+                  disabled={!hasDeviation || !dispositionRemark.trim()}
+                  title={!hasDeviation ? "Available only when one or more results are outside specification" : !dispositionRemark.trim() ? "Enter disposition remarks" : "Accept with deviation"}
+                  onClick={() =>
                       act(`/receipts/${r.id}/disposition`, "POST", {
                         disposition: "ACCEPTED_WITH_DEVIATION",
-                        reason_text: reason.trim(),
-                      });
-                  }}
+                        reason_text: dispositionRemark.trim(),
+                      })}
                 >
                   Accept with Deviation
                 </button>
                 <button
-                  onClick={() => {
-                    const reason = prompt("Rejection reason");
-                    if (reason)
+                  className="rejectAction"
+                  disabled={!hasDeviation || !dispositionRemark.trim()}
+                  title={!hasDeviation ? "Reject is available only when one or more results are outside specification" : !dispositionRemark.trim() ? "Enter disposition remarks" : "Reject batch"}
+                  onClick={() =>
                       act(`/receipts/${r.id}/disposition`, "POST", {
                         disposition: "REJECTED",
-                        reason_text: reason,
-                      });
-                  }}
+                        reason_text: dispositionRemark.trim(),
+                      })}
                 >
                   Reject
                 </button>
               </>
             )}
           </div>
+          {r.status === "UNDER_REVIEW" && <div className={hasDeviation ? "dispositionRule deviation" : "dispositionRule pass"}>{hasDeviation ? `${qualitySummary.fail} result${qualitySummary.fail === 1 ? " is" : "s are"} outside specification. Accept with Deviation or Reject is available after entering remarks.` : allWithinSpecification ? "All quality results are within specification. Accept Batch is available." : "Disposition is unavailable until all mandatory approved results are complete."}</div>}
           {sample && (
             <p className="muted">
               Sample: <b>{sample.sample_no}</b> · {sample.sample_status}
@@ -3980,6 +4085,19 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
         </div>}
         </DataGrid>
       </section>
+      {comparisonOpen && sample && (
+        <div className="modalBackdrop" onClick={() => setComparisonOpen(false)}>
+          <div className="specModal comparisonModal" onClick={(event) => event.stopPropagation()}>
+            <div className="panelTitle">
+              <div><span className="eyebrow">QUALITY RESULT COMPARISON</span><h2>Specification vs Actual</h2><p className="muted">{r.receipt_no} · {sample.sample_no} · Specification {r.specification.version}</p></div>
+              <button type="button" onClick={() => setComparisonOpen(false)}>×</button>
+            </div>
+            <div className="comparisonLegend"><span><i className="comparisonDot pass"/>Within specification</span><span><i className="comparisonDot fail"/>Deviation</span><span><i className="comparisonDot pending"/>Result pending</span></div>
+            <div className="tablewrap"><table className="comparisonTable"><thead><tr><th>Attribute</th><th>Unit</th><th>Minimum</th><th>Aim / Required</th><th>Maximum</th><th>Actual</th><th>Evaluation</th></tr></thead><tbody>{comparisonTests.map((test: any) => <tr className={test.evaluation === "FAIL" ? "comparisonFail" : test.evaluation === "PASS" ? "comparisonPass" : "comparisonPending"} key={test.specification_attribute_id}><td><b>{test.code}</b><br/><small>{test.name}</small></td><td>{test.uom || "—"}</td><td>{test.lsl ?? "—"}</td><td>{test.aim_value ?? test.target_value ?? "—"}</td><td>{test.usl ?? "—"}</td><td className="actualValue">{test.result ?? "Pending"}</td><td><Badge>{test.evaluation}</Badge></td></tr>)}</tbody></table>{!comparisonTests.length && <div className="empty">No quality attributes are available for comparison.</div>}</div>
+            <div className="actions"><button type="button" onClick={() => setComparisonOpen(false)}>Close</button></div>
+          </div>
+        </div>
+      )}
       {tests.length > 0 && sample && (
         <section className="panel lab">
           <div className="panelTitle">

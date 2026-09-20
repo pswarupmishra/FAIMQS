@@ -1,9 +1,12 @@
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, timedelta
 import re
 import json
 from collections import defaultdict
 from decimal import Decimal
 from statistics import mean, pstdev
+from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
@@ -336,12 +339,24 @@ def load_demo(db: Session=Depends(get_db)):
 
 
 @app.get("/api/v1/receipts", response_model=list[ReceiptOut])
-def receipts(limit: int = Query(500, ge=1, le=5000), db: Session=Depends(get_db)):
-    return db.query(Receipt).options(joinedload(Receipt.material), joinedload(Receipt.supplier), joinedload(Receipt.specification)).order_by(Receipt.receipt_datetime.desc()).limit(limit).all()
+def receipts(limit: int = Query(500, ge=1, le=5000), release_state: Optional[str] = None, db: Session=Depends(get_db)):
+    query = db.query(Receipt).options(joinedload(Receipt.material), joinedload(Receipt.supplier), joinedload(Receipt.specification))
+    if release_state:
+        query = query.filter(Receipt.release_state == release_state.strip().upper())
+    return query.order_by(Receipt.receipt_datetime.desc()).limit(limit).all()
 
 @app.get("/api/v1/reports/material-quality-register")
-def material_quality_register(db: Session=Depends(get_db)):
-    rows=(db.query(Receipt).options(joinedload(Receipt.material),joinedload(Receipt.supplier),joinedload(Receipt.specification),joinedload(Receipt.plant),joinedload(Receipt.sms),joinedload(Receipt.store),joinedload(Receipt.samples).joinedload(Sample.results).joinedload(TestResult.specification_attribute).joinedload(SpecificationAttribute.attribute)).order_by(Receipt.receipt_datetime.desc()).all())
+def material_quality_register(material_id:Optional[str]=None,supplier_id:Optional[str]=None,status:Optional[str]=None,date_from:Optional[str]=None,date_to:Optional[str]=None,search:Optional[str]=None,limit:int=Query(1000,ge=1,le=5000),db: Session=Depends(get_db)):
+    query=db.query(Receipt).options(joinedload(Receipt.material),joinedload(Receipt.supplier),joinedload(Receipt.specification),joinedload(Receipt.plant),joinedload(Receipt.sms),joinedload(Receipt.store),joinedload(Receipt.samples).joinedload(Sample.results).joinedload(TestResult.specification_attribute).joinedload(SpecificationAttribute.attribute))
+    if material_id: query=query.filter(Receipt.material_id==material_id)
+    if supplier_id: query=query.filter(Receipt.supplier_id==supplier_id)
+    if status: query=query.filter(Receipt.inspection_status==status)
+    if date_from: query=query.filter(Receipt.receipt_datetime>=datetime.fromisoformat(date_from))
+    if date_to: query=query.filter(Receipt.receipt_datetime<datetime.fromisoformat(date_to)+timedelta(days=1))
+    if search:
+        term=f"%{search.strip()}%"
+        query=query.filter(or_(Receipt.receipt_no.ilike(term),Receipt.supplier_batch_no.ilike(term),Receipt.internal_batch_no.ilike(term),Receipt.po_no.ilike(term),Receipt.grn_no.ilike(term)))
+    rows=query.order_by(Receipt.receipt_datetime.desc()).limit(limit).all()
     result=[]
     for x in rows:
         exceptions=[]
@@ -374,9 +389,12 @@ ANALYSIS_REFERENCE_FIELDS = {
 def batch_analysis(
     reference_fields: str = "supplier_batch_no",
     consolidation: str = "ALL",
-    supplier_id: str | None = None,
-    material_id: str | None = None,
-    search: str | None = None,
+    supplier_id: Optional[str] = None,
+    material_id: Optional[str] = None,
+    search: Optional[str] = None,
+    selected_reference: Optional[str] = None,
+    include_series: bool = True,
+    receipt_limit: int = 1000,
     db: Session = Depends(get_db),
 ):
     fields = [field.strip() for field in reference_fields.split(",") if field.strip()]
@@ -396,7 +414,10 @@ def batch_analysis(
             Receipt.internal_batch_no.ilike(term), Receipt.po_no.ilike(term),
             Receipt.grn_no.ilike(term), Receipt.vehicle_no.ilike(term),
         ))
-    receipts = query.order_by(Receipt.receipt_datetime).all()
+    receipt_limit = max(1, min(receipt_limit, 5000))
+    total_receipts = query.count()
+    receipts = query.order_by(Receipt.receipt_datetime.desc()).limit(receipt_limit).all()
+    receipts.reverse()
 
     grouped_receipts = defaultdict(list)
     receipt_reference = {}
@@ -406,9 +427,28 @@ def batch_analysis(
         grouped_receipts[reference_id].append(receipt)
         receipt_reference[receipt.id] = reference_id
 
+    batch_groups = grouped_receipts
+    if selected_reference is not None:
+        selected_receipts = grouped_receipts.get(selected_reference, [])
+        batch_groups = defaultdict(list, {selected_reference: selected_receipts}) if selected_receipts else defaultdict(list)
+        if selected_receipts:
+            target = max(selected_receipts, key=lambda receipt: receipt.receipt_datetime)
+            receipts = [receipt for receipt in receipts if receipt.supplier_id == target.supplier_id and receipt.material_id == target.material_id]
+        else:
+            receipts = []
+
     receipt_ids = [receipt.id for receipt in receipts]
     results = []
+    numeric_attributes_by_reference = defaultdict(set)
     if receipt_ids:
+        numeric_attribute_rows = (db.query(Sample.receipt_id, SpecificationAttribute.attribute_id)
+            .join(TestResult, TestResult.sample_id == Sample.id)
+            .join(SpecificationAttribute, TestResult.specification_attribute_id == SpecificationAttribute.id)
+            .filter(Sample.receipt_id.in_(receipt_ids), TestResult.numeric_result.isnot(None))
+            .distinct().all())
+        for receipt_id, attribute_id in numeric_attribute_rows:
+            numeric_attributes_by_reference[receipt_reference[receipt_id]].add(attribute_id)
+    if include_series and receipt_ids:
         results = (db.query(TestResult)
             .options(joinedload(TestResult.specification_attribute).joinedload(SpecificationAttribute.attribute), joinedload(TestResult.sample))
             .join(Sample, TestResult.sample_id == Sample.id)
@@ -429,6 +469,10 @@ def batch_analysis(
         }
         observations[reference_id][attribute.id].append({
             "receipt_id": receipt.id, "receipt_no": receipt.receipt_no,
+            "supplier_code": receipt.supplier.supplier_code,
+            "supplier_name": receipt.supplier.supplier_name,
+            "material_code": receipt.material.material_code,
+            "material_name": receipt.material.material_name,
             "sample_no": result.sample.sample_no, "date": result.entered_at or receipt.receipt_datetime,
             "value": float(result.numeric_result),
             "lsl": float(spec_attribute.lsl) if spec_attribute.lsl is not None else None,
@@ -473,7 +517,7 @@ def batch_analysis(
         }
 
     batches = []
-    for reference_id, group in grouped_receipts.items():
+    for reference_id, group in batch_groups.items():
         latest = max(group, key=lambda receipt: receipt.receipt_datetime)
         batches.append({
             "reference_id": reference_id, "receipt_count": len(group),
@@ -486,10 +530,15 @@ def batch_analysis(
             "supplier_batch_no": latest.supplier_batch_no, "internal_batch_no": latest.internal_batch_no,
             "po_no": latest.po_no, "grn_no": latest.grn_no, "vehicle_no": latest.vehicle_no,
             "status": latest.inspection_status, "specification_version": latest.specification.version,
-            "numeric_attributes": len(observations.get(reference_id, {})),
+            "numeric_attributes": len(numeric_attributes_by_reference.get(reference_id, set())),
         })
     batches.sort(key=lambda item: item["receipt_datetime"], reverse=True)
-    return {"reference_fields": fields, "consolidation": policy, "batches": batches, "series": list(series.values())}
+    return {
+        "reference_fields": fields, "consolidation": policy,
+        "batches": batches, "series": list(series.values()),
+        "total_receipts": total_receipts, "loaded_receipts": min(total_receipts, receipt_limit),
+        "truncated": total_receipts > receipt_limit,
+    }
 
 @app.post("/api/v1/receipts", response_model=ReceiptOut)
 def create_receipt(data: ReceiptCreate, db: Session=Depends(get_db)):
@@ -510,6 +559,14 @@ def create_receipt(data: ReceiptCreate, db: Session=Depends(get_db)):
 def receipt_detail(rid: str, db: Session=Depends(get_db)):
     r=db.query(Receipt).options(joinedload(Receipt.material),joinedload(Receipt.supplier),joinedload(Receipt.specification).joinedload(Specification.attributes).joinedload(SpecificationAttribute.attribute),joinedload(Receipt.samples)).filter(Receipt.id==rid).first()
     if not r: raise HTTPException(404,"Receipt not found")
+    approved_results=(db.query(TestResult).join(Sample,TestResult.sample_id==Sample.id)
+        .filter(Sample.receipt_id==rid,TestResult.result_status=="APPROVED").all())
+    quality_summary={
+      "total":len(approved_results),
+      "pass":sum(x.evaluation_status=="PASS" for x in approved_results),
+      "fail":sum(x.evaluation_status=="FAIL" for x in approved_results),
+      "pending":sum(x.evaluation_status not in {"PASS","FAIL"} for x in approved_results),
+    }
     return {
       "id":r.id,"receipt_no":r.receipt_no,"status":r.inspection_status,"release_state":r.release_state,
       "material":{"code":r.material.material_code,"name":r.material.material_name,"description":r.material.material_description},
@@ -518,7 +575,8 @@ def receipt_detail(rid: str, db: Session=Depends(get_db)):
       "location":{"plant_code":r.plant_code,"plant_name":r.plant.plant_name if r.plant else None,"sms_code":r.sms_code,"sms_name":r.sms.sms_name if r.sms else None,"store_code":r.store_code,"store_name":r.store.store_name if r.store else None},
       "quantity":float(r.quantity),"uom":r.uom,"receipt_datetime":r.receipt_datetime,"specification":{"id":r.specification.id,"version":r.specification.version,"effective_from":r.specification.effective_from,"effective_to":r.specification.effective_to,
       "attributes":[{"id":x.id,"code":x.attribute.attribute_code,"name":x.attribute.attribute_name,"data_type":x.attribute.data_type,"uom":x.attribute.uom,"lsl":float(x.lsl) if x.lsl is not None else None,"aim_value":float(x.aim_value) if x.aim_value is not None else None,"usl":float(x.usl) if x.usl is not None else None,"target_value":x.target_value} for x in sorted(r.specification.attributes,key=lambda z:z.display_sequence)]},
-      "samples":[{"id":s.id,"sample_no":s.sample_no,"sample_type":s.sample_type,"sample_status":s.sample_status} for s in r.samples]
+      "samples":[{"id":s.id,"sample_no":s.sample_no,"sample_type":s.sample_type,"sample_status":s.sample_status} for s in r.samples],
+      "quality_summary":quality_summary,
     }
 
 @app.post("/api/v1/receipts/{rid}/submit")
@@ -618,9 +676,16 @@ def disposition(rid:str,data:DispositionIn,db:Session=Depends(get_db)):
     if not r: raise HTTPException(404,"Receipt not found")
     allowed={"ACCEPTED","ACCEPTED_WITH_DEVIATION","CONDITIONALLY_ACCEPTED","ON_HOLD","REJECTED"}
     if data.disposition not in allowed: raise HTTPException(400,"Unsupported disposition")
+    if r.inspection_status != "UNDER_REVIEW": raise HTTPException(409,"Only batches under quality review can be dispositioned")
     results=db.query(TestResult).join(Sample,TestResult.sample_id==Sample.id).filter(Sample.receipt_id==rid,TestResult.result_status=="APPROVED").all()
+    required_count=db.query(SpecificationAttribute).filter_by(specification_id=r.specification_id,mandatory=True).count()
+    completed_ids={x.specification_attribute_id for x in results if x.evaluation_status in {"PASS","FAIL"}}
+    if required_count == 0 or len(completed_ids) < required_count:
+        raise HTTPException(409,"All mandatory approved quality results are required before disposition")
     has_fail=any(x.evaluation_status=="FAIL" for x in results)
     if data.disposition=="ACCEPTED" and has_fail: raise HTTPException(409,"Failed mandatory results prevent normal acceptance")
+    if data.disposition in {"ACCEPTED_WITH_DEVIATION","REJECTED"} and not has_fail:
+        raise HTTPException(409,"This disposition is available only when one or more quality results are outside specification")
     if data.disposition in {"ACCEPTED_WITH_DEVIATION","CONDITIONALLY_ACCEPTED","ON_HOLD","REJECTED"} and not data.reason_text:
         raise HTTPException(400,"Reason is required")
     db.add(Disposition(receipt_id=rid,disposition=data.disposition,reason_text=data.reason_text))
