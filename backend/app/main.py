@@ -380,6 +380,45 @@ def material_quality_register(material_id:Optional[str]=None,supplier_id:Optiona
         "exceptions":exceptions})
     return result
 
+@app.get("/api/v1/reports/supplier-performance")
+def supplier_performance_report(material_id:Optional[str]=None,supplier_id:Optional[str]=None,date_from:Optional[str]=None,date_to:Optional[str]=None,db:Session=Depends(get_db)):
+    filters=[]
+    if material_id: filters.append(Receipt.material_id==material_id)
+    if supplier_id: filters.append(Receipt.supplier_id==supplier_id)
+    try:
+        if date_from: filters.append(Receipt.receipt_datetime>=datetime.fromisoformat(date_from))
+        if date_to: filters.append(Receipt.receipt_datetime<datetime.fromisoformat(date_to)+timedelta(days=1))
+    except ValueError:
+        raise HTTPException(400,"Receipt dates must use YYYY-MM-DD format")
+    status_rows=(db.query(Receipt.supplier_id,Supplier.supplier_code,Supplier.supplier_name,
+        Receipt.material_id,Material.material_code,Material.material_name,Receipt.inspection_status,func.count(Receipt.id))
+        .join(Supplier,Receipt.supplier_id==Supplier.id).join(Material,Receipt.material_id==Material.id)
+        .filter(*filters).group_by(Receipt.supplier_id,Supplier.supplier_code,Supplier.supplier_name,
+        Receipt.material_id,Material.material_code,Material.material_name,Receipt.inspection_status).all())
+    categories=("ACCEPTED","ACCEPTED_WITH_DEVIATION","REJECTED","OTHER")
+    def category(status): return status if status in categories[:-1] else "OTHER"
+    summary={key:0 for key in categories}; suppliers_grouped={}; materials_grouped={}
+    for supplier_key,supplier_code,supplier_name,material_key,material_code,material_name,status,count in status_rows:
+        bucket=category(status); summary[bucket]+=count
+        supplier_row=suppliers_grouped.setdefault(supplier_key,{"id":supplier_key,"code":supplier_code,"name":supplier_name,**{key:0 for key in categories}})
+        material_row=materials_grouped.setdefault(material_key,{"id":material_key,"code":material_code,"name":material_name,**{key:0 for key in categories}})
+        supplier_row[bucket]+=count; material_row[bucket]+=count
+    for row in [*suppliers_grouped.values(),*materials_grouped.values()]: row["total"]=sum(row[key] for key in categories)
+    summary["total"]=sum(summary[key] for key in categories)
+    attribute_rows=(db.query(QualityAttribute.id,QualityAttribute.attribute_code,QualityAttribute.attribute_name,
+        Receipt.inspection_status,func.count(func.distinct(Receipt.id)),func.count(TestResult.id))
+        .join(SpecificationAttribute,SpecificationAttribute.attribute_id==QualityAttribute.id)
+        .join(TestResult,TestResult.specification_attribute_id==SpecificationAttribute.id)
+        .join(Sample,Sample.id==TestResult.sample_id).join(Receipt,Receipt.id==Sample.receipt_id)
+        .filter(*filters,TestResult.evaluation_status=="FAIL",Receipt.inspection_status.in_(["REJECTED","ACCEPTED_WITH_DEVIATION"]))
+        .group_by(QualityAttribute.id,QualityAttribute.attribute_code,QualityAttribute.attribute_name,Receipt.inspection_status).all())
+    contributors=[{"attribute_id":attribute_id,"attribute_code":code,"attribute_name":name,"quality_state":status,
+        "receipt_count":receipt_count,"failed_result_count":failed_count}
+        for attribute_id,code,name,status,receipt_count,failed_count in attribute_rows]
+    contributors.sort(key=lambda row:(-row["receipt_count"],row["attribute_code"],row["quality_state"]))
+    return {"summary":summary,"by_supplier":sorted(suppliers_grouped.values(),key=lambda row:(-row["total"],row["code"])),
+        "by_material":sorted(materials_grouped.values(),key=lambda row:(-row["total"],row["code"])),"attribute_contributors":contributors}
+
 ANALYSIS_REFERENCE_FIELDS = {
     "supplier_batch_no", "internal_batch_no", "receipt_no", "grn_no", "po_no",
     "vehicle_no", "plant_code", "sms_code", "store_code",
@@ -471,8 +510,13 @@ def batch_analysis(
             "receipt_id": receipt.id, "receipt_no": receipt.receipt_no,
             "supplier_code": receipt.supplier.supplier_code,
             "supplier_name": receipt.supplier.supplier_name,
+            "supplier_batch_no": receipt.supplier_batch_no,
+            "internal_batch_no": receipt.internal_batch_no,
+            "po_no": receipt.po_no, "grn_no": receipt.grn_no,
+            "vehicle_no": receipt.vehicle_no,
             "material_code": receipt.material.material_code,
             "material_name": receipt.material.material_name,
+            "specification_version": receipt.specification.version,
             "sample_no": result.sample.sample_no, "date": result.entered_at or receipt.receipt_datetime,
             "value": float(result.numeric_result),
             "lsl": float(spec_attribute.lsl) if spec_attribute.lsl is not None else None,

@@ -527,7 +527,7 @@ function App() {
           <AnalysisPage materials={materials} suppliers={suppliers} notify={setMsg} />
         )}
         {tab === "report" && (
-          <MaterialQualityReport openReceipt={openReceipt} materials={materials} suppliers={suppliers} />
+          <ReportPage openReceipt={openReceipt} materials={materials} suppliers={suppliers} />
         )}
         {tab === "docs" && <DocumentationPage />}
       </main>
@@ -1110,12 +1110,16 @@ const ANALYSIS_REFERENCE_OPTIONS = [
 ];
 
 function AnalysisTrendChart({ series, selectedReference, spc }: any) {
+  const [selectedPoint, setSelectedPoint] = useState<any>(null),
+    [pointTab, setPointTab] = useState("SUPPLIER");
   const width = 720,
     height = 210,
     pad = 34;
   const points = series.points || [];
+  const selectedReferencePoints = points.filter((point: any) => point.reference_id === selectedReference);
+  const applicableAim = selectedReferencePoints[selectedReferencePoints.length - 1]?.aim ?? points[points.length - 1]?.aim;
   const extra = spc
-    ? [series.stats?.lcl, series.stats?.ucl]
+    ? [series.stats?.lcl, series.stats?.ucl, applicableAim]
     : points.flatMap((point: any) => [point.lsl, point.usl, point.aim]);
   const values = [
     ...points.map((point: any) => Number(point.value)),
@@ -1141,13 +1145,19 @@ function AnalysisTrendChart({ series, selectedReference, spc }: any) {
         [series.stats?.ucl, "UCL", "#d9485f"],
         [series.stats?.mean, "Mean", "#213a8f"],
         [series.stats?.lcl, "LCL", "#d9485f"],
+        [applicableAim, "Aim", "#18845b"],
       ]
     : [
         [points[points.length - 1]?.usl, "USL", "#d9485f"],
         [points[points.length - 1]?.aim, "Aim", "#213a8f"],
         [points[points.length - 1]?.lsl, "LSL", "#d9485f"],
       ];
+  const selectPoint = (point: any, index: number) => {
+    setSelectedPoint({ ...point, chartIndex: index });
+    setPointTab("SUPPLIER");
+  };
   return (
+    <div className="trendChartWrap">
     <svg className="trendChart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${series.name} trend`}>
       {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
         <line key={ratio} x1={pad} x2={width - pad} y1={pad + ratio * (height - pad * 2)} y2={pad + ratio * (height - pad * 2)} className="chartGrid" />
@@ -1162,21 +1172,43 @@ function AnalysisTrendChart({ series, selectedReference, spc }: any) {
       )}
       {points.length > 1 && <polyline points={line} className="trendLine" />}
       {points.map((point: any, index: number) => (
-        <g key={`${point.reference_id}-${point.receipt_id}-${index}`}>
+        <g key={`${point.reference_id}-${point.receipt_id}-${index}`} role="button" tabIndex={0} aria-label={`View ${series.name} details for ${point.reference_id}`} onClick={() => selectPoint(point, index)} onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && selectPoint(point, index)}>
           <circle cx={x(index)} cy={y(Number(point.value))} r={point.reference_id === selectedReference ? 6 : 4} className={point.reference_id === selectedReference ? "trendPoint selected" : "trendPoint"} />
-          <title>{[
-            `Supplier: ${point.supplier_code || "—"} · ${point.supplier_name || "—"}`,
-            `Material: ${point.material_code || "—"} · ${point.material_name || "—"}`,
-            `Reference: ${point.reference_id} · Receipt: ${point.receipt_no}`,
-            `Attribute: ${series.code} · ${series.name}`,
-            `Specification: ${point.lsl ?? "—"} / Aim ${point.aim ?? "—"} / ${point.usl ?? "—"} ${series.uom || ""}`,
-            `Actual: ${point.value} ${series.uom || ""} · ${point.status || "PENDING"}`,
-          ].join("\n")}</title>
+          <title>Click for supplier and quality details</title>
         </g>
       ))}
       <text x={pad} y={height - 7} className="chartAxisText">{points[0]?.reference_id || ""}</text>
       <text x={width - pad} y={height - 7} textAnchor="end" className="chartAxisText">{points[points.length - 1]?.reference_id || ""}</text>
     </svg>
+    {selectedPoint && (
+      <div className="chartPointTooltip" style={{ left: `${Math.max(20, Math.min(80, (x(selectedPoint.chartIndex) / width) * 100))}%` }}>
+        <div className="chartPointTooltipHead"><div><b>{selectedPoint.reference_id}</b><small>{selectedPoint.receipt_no} · {selectedPoint.sample_no}</small></div><button type="button" aria-label="Close point details" onClick={() => setSelectedPoint(null)}>×</button></div>
+        <div className="chartPointTabs">
+          <button type="button" className={pointTab === "SUPPLIER" ? "active" : ""} onClick={() => setPointTab("SUPPLIER")}>Supplier Information</button>
+          <button type="button" className={pointTab === "QUALITY" ? "active" : ""} onClick={() => setPointTab("QUALITY")}>Specification vs Actual</button>
+        </div>
+        {pointTab === "SUPPLIER" ? (
+          <div className="chartPointDetails">
+            <span>Supplier<b>{selectedPoint.supplier_code || "—"} · {selectedPoint.supplier_name || "—"}</b></span>
+            <span>Supplier Batch<b>{selectedPoint.supplier_batch_no || "—"}</b></span>
+            <span>Internal Batch<b>{selectedPoint.internal_batch_no || "—"}</b></span>
+            <span>Material<b>{selectedPoint.material_code || "—"} · {selectedPoint.material_name || "—"}</b></span>
+            <span>PO / GRN<b>{selectedPoint.po_no || "—"} / {selectedPoint.grn_no || "—"}</b></span>
+            <span>Vehicle<b>{selectedPoint.vehicle_no || "—"}</b></span>
+            <span>Result Date<b>{selectedPoint.date ? new Date(selectedPoint.date).toLocaleString() : "—"}</b></span>
+            <span>Source Results<b>{selectedPoint.source_count || 1}</b></span>
+          </div>
+        ) : (
+          <div className="chartPointQuality">
+            <div><span>Attribute</span><b>{series.code} · {series.name}</b></div>
+            <div><span>Specification</span><b>{selectedPoint.specification_version || "—"}</b></div>
+            <div className="qualityComparison"><span>Minimum<b>{selectedPoint.lsl ?? "—"}</b></span><span>Aim<b>{selectedPoint.aim ?? "—"}</b></span><span>Maximum<b>{selectedPoint.usl ?? "—"}</b></span><span className={selectedPoint.status === "FAIL" ? "qualityActual fail" : "qualityActual pass"}>Actual<b>{selectedPoint.value} {series.uom || ""}</b></span></div>
+            <Badge>{selectedPoint.status || "PENDING"}</Badge>
+          </div>
+        )}
+      </div>
+    )}
+    </div>
   );
 }
 
@@ -1389,6 +1421,49 @@ function AnalysisPage({ materials, suppliers, notify }: any) {
     </>
   );
 }
+
+const PERFORMANCE_STATES = [
+  ["ACCEPTED", "Accepted"],
+  ["ACCEPTED_WITH_DEVIATION", "Accepted with deviation"],
+  ["REJECTED", "Rejected"],
+  ["OTHER", "In process / other"],
+];
+
+function PerformanceBreakdown({ title, rows, display }: any) {
+  const metric = (value: number, total: number) => display === "PERCENT" ? `${total ? ((value / total) * 100).toFixed(1) : "0.0"}%` : value.toLocaleString();
+  return <section className="panel performancePanel"><div className="panelTitle"><div><h2>{title}</h2><p className="muted">Receipt quality-state distribution</p></div><Badge>{rows.length} GROUPS</Badge></div>
+    <div className="performanceBars">{rows.map((row: any) => <div className="performanceBarRow" key={row.id}><div className="performanceBarLabel"><b>{row.code}</b><span>{row.name}</span><strong>{row.total.toLocaleString()}</strong></div><div className="performanceTrack">{PERFORMANCE_STATES.map(([state, label]) => row[state] ? <div key={state} className={`performanceSegment ${state.toLowerCase()}`} style={{width:`${(row[state] / row.total) * 100}%`}} title={`${label}: ${metric(row[state], row.total)}`}><span>{metric(row[state], row.total)}</span></div> : null)}</div></div>)}</div>
+    {!rows.length && <div className="empty">No receipts match the selected filters.</div>}
+  </section>;
+}
+
+function SupplierPerformanceReport({ materials, suppliers }: any) {
+  const [filters,setFilters]=useState({supplier:"",material:"",from:"",to:""}),
+    [display,setDisplay]=useState("ABSOLUTE"),
+    [data,setData]=useState<any>({summary:{total:0,ACCEPTED:0,ACCEPTED_WITH_DEVIATION:0,REJECTED:0,OTHER:0},by_supplier:[],by_material:[],attribute_contributors:[]}),
+    [loading,setLoading]=useState(false),[error,setError]=useState(""),[drillState,setDrillState]=useState("REJECTED");
+  useEffect(()=>{const params=new URLSearchParams();if(filters.supplier)params.set("supplier_id",filters.supplier);if(filters.material)params.set("material_id",filters.material);if(filters.from)params.set("date_from",filters.from);if(filters.to)params.set("date_to",filters.to);setLoading(true);setError("");fetch(API+`/reports/supplier-performance?${params}`).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.detail||"Unable to load supplier performance");return body}).then(setData).catch(reason=>setError(reason instanceof Error?reason.message:"Unable to load supplier performance")).finally(()=>setLoading(false));},[filters.supplier,filters.material,filters.from,filters.to]);
+  const summary=data.summary,total=summary.total||0;
+  const value=(count:number)=>display==="PERCENT"?`${total?((count/total)*100).toFixed(1):"0.0"}%`:count.toLocaleString();
+  const contributors=data.attribute_contributors.filter((row:any)=>row.quality_state===drillState);
+  return <>
+    <section className="panel supplierPerformanceHero"><div className="panelTitle"><div><span className="eyebrow">EXECUTIVE QUALITY INSIGHT</span><h2>Supplier Performance</h2><p className="muted">Receipt quality outcomes by supplier, material and contributing exception attribute.</p></div><div className="metricSwitch"><button className={display==="ABSOLUTE"?"active":""} onClick={()=>setDisplay("ABSOLUTE")}>Absolute</button><button className={display==="PERCENT"?"active":""} onClick={()=>setDisplay("PERCENT")}>Percentage</button></div></div>
+      <div className="performanceFilters"><label>Supplier<select value={filters.supplier} onChange={event=>setFilters({...filters,supplier:event.target.value})}><option value="">All suppliers</option>{suppliers.map((row:any)=><option key={row.id} value={row.id}>{row.supplier_code} · {row.supplier_name}</option>)}</select></label><label>Material<select value={filters.material} onChange={event=>setFilters({...filters,material:event.target.value})}><option value="">All materials</option>{materials.map((row:any)=><option key={row.id} value={row.id}>{row.material_code} · {row.material_name}</option>)}</select></label><label>Receipt From<input type="date" value={filters.from} onChange={event=>setFilters({...filters,from:event.target.value})}/></label><label>Receipt To<input type="date" min={filters.from} value={filters.to} onChange={event=>setFilters({...filters,to:event.target.value})}/></label><button onClick={()=>setFilters({supplier:"",material:"",from:"",to:""})}>Clear</button></div>
+    </section>
+    {error&&<div className="message">{error}. Check that the backend service is running with the latest code.</div>}
+    <div className="performanceKpis">{PERFORMANCE_STATES.map(([state,label])=><button key={state} className={`performanceKpi ${state.toLowerCase()} ${drillState===state?"selected":""}`} onClick={()=>state!=="OTHER"&&setDrillState(state)}><span>{label}</span><strong>{loading?"…":value(summary[state]||0)}</strong><small>{(summary[state]||0).toLocaleString()} of {total.toLocaleString()} receipts</small></button>)}</div>
+    <div className="performanceLegend">{PERFORMANCE_STATES.map(([state,label])=><span key={state}><i className={state.toLowerCase()}/>{label}</span>)}</div>
+    <div className="performanceSplit"><PerformanceBreakdown title="Supplier-wise Performance" rows={data.by_supplier} display={display}/><PerformanceBreakdown title="Material-wise Performance" rows={data.by_material} display={display}/></div>
+    <section className="panel contributorPanel"><div className="panelTitle"><div><h2>Exception Attribute Drill-down</h2><p className="muted">Failed attributes contributing to rejected or deviation-accepted receipts.</p></div><div className="metricSwitch"><button className={drillState==="REJECTED"?"active":""} onClick={()=>setDrillState("REJECTED")}>Rejected</button><button className={drillState==="ACCEPTED_WITH_DEVIATION"?"active":""} onClick={()=>setDrillState("ACCEPTED_WITH_DEVIATION")}>Accepted with Deviation</button></div></div>
+      <div className="contributorChart">{contributors.slice(0,12).map((row:any)=>{const max=Math.max(...contributors.map((item:any)=>item.receipt_count),1);return <div className="contributorRow" key={`${row.attribute_id}-${row.quality_state}`}><span><b>{row.attribute_code}</b> · {row.attribute_name}</span><div><i style={{width:`${(row.receipt_count/max)*100}%`}}/><strong>{row.receipt_count}</strong></div></div>})}</div>
+      <DataGrid rows={contributors} searchText={(row)=>`${row.attribute_code} ${row.attribute_name} ${row.quality_state}`} sortOptions={[["Attribute",(row)=>row.attribute_name],["Affected receipts",(row)=>row.receipt_count],["Failed results",(row)=>row.failed_result_count]]} exportName={`supplier-performance-${drillState.toLowerCase()}`}>
+      {(gridRows)=><div className="tablewrap"><table><thead><tr><th>Attribute</th><th>Quality State</th><th>Affected Receipts</th><th>Failed Results</th><th>Share of Outcome</th></tr></thead><tbody>{gridRows.map((row:any)=><tr key={`${row.attribute_id}-${row.quality_state}`}><td><b>{row.attribute_code}</b><br/><small>{row.attribute_name}</small></td><td><Badge>{row.quality_state}</Badge></td><td>{row.receipt_count}</td><td>{row.failed_result_count}</td><td>{(summary[drillState]||0)?((row.receipt_count/summary[drillState])*100).toFixed(1):"0.0"}%</td></tr>)}</tbody></table>{!gridRows.length&&<div className="empty">No failed attributes contributed to this outcome in the selected period.</div>}</div>}
+      </DataGrid>
+    </section>
+  </>;
+}
+
+function ReportPage(props:any){const [report,setReport]=useState("REGISTER");return <><div className="configTabs"><button className={report==="REGISTER"?"active":""} onClick={()=>setReport("REGISTER")}>Material Quality Register</button><button className={report==="SUPPLIER_PERFORMANCE"?"active":""} onClick={()=>setReport("SUPPLIER_PERFORMANCE")}>Supplier Performance</button></div>{report==="REGISTER"?<MaterialQualityReport {...props}/>:<SupplierPerformanceReport materials={props.materials} suppliers={props.suppliers}/>}</>}
 
 function MaterialQualityReport({ openReceipt, materials, suppliers }: any) {
   const [rows, setRows] = useState<any[]>([]);

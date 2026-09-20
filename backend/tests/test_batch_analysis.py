@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.main import batch_analysis
+from app.main import batch_analysis, supplier_performance_report
 from app.models import (
     Material, QualityAttribute, Receipt, Sample, Specification,
     SpecificationAttribute, Supplier, TestResult,
@@ -64,6 +64,12 @@ class BatchAnalysisTests(unittest.TestCase):
         self.assertEqual(1, len(data["batches"]))
         self.assertEqual(2, data["batches"][0]["receipt_count"])
         self.assertEqual([10.0, 20.0], [point["value"] for point in data["series"][0]["points"]])
+        point = data["series"][0]["points"][0]
+        self.assertEqual("SUP", point["supplier_code"])
+        self.assertEqual("LOT-1", point["supplier_batch_no"])
+        self.assertEqual("I1", point["internal_batch_no"])
+        self.assertEqual("PO", point["po_no"])
+        self.assertEqual("V1", point["specification_version"])
 
     def test_latest_keeps_newest_observation(self):
         data = self.analyze("LATEST")
@@ -74,6 +80,20 @@ class BatchAnalysisTests(unittest.TestCase):
         data = self.analyze("MEAN")
         self.assertEqual(15.0, data["series"][0]["points"][0]["value"])
         self.assertEqual(2, data["series"][0]["points"][0]["source_count"])
+
+    def test_supplier_performance_groups_outcomes_and_failed_attributes(self):
+        receipts = self.db.query(Receipt).order_by(Receipt.receipt_no).all()
+        receipts[0].inspection_status = "ACCEPTED_WITH_DEVIATION"
+        receipts[1].inspection_status = "REJECTED"
+        for result in self.db.query(TestResult).all():
+            result.evaluation_status = "FAIL"
+        self.db.commit()
+        data = supplier_performance_report(db=self.db)
+        self.assertEqual(2, data["summary"]["total"])
+        self.assertEqual(1, data["summary"]["ACCEPTED_WITH_DEVIATION"])
+        self.assertEqual(1, data["summary"]["REJECTED"])
+        self.assertEqual(2, data["by_supplier"][0]["total"])
+        self.assertEqual({"ACCEPTED_WITH_DEVIATION", "REJECTED"}, {row["quality_state"] for row in data["attribute_contributors"]})
 
 
 if __name__ == "__main__":
