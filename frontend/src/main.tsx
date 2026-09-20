@@ -20,21 +20,28 @@ function DataGrid({
   sortOptions,
   children,
   initialPageSize = 10,
+  exportName = "grid-data",
 }: {
   rows: any[];
   searchText: (row: any) => string;
   sortOptions: GridSort[];
   children: (pageRows: any[]) => React.ReactNode;
   initialPageSize?: number;
+  exportName?: string;
 }) {
   const [query, setQuery] = useState(""),
+    [columnFilters, setColumnFilters] = useState<Record<string, string>>({}),
     [sortKey, setSortKey] = useState("0"),
     [direction, setDirection] = useState("asc"),
     [pageSize, setPageSize] = useState(initialPageSize),
     [page, setPage] = useState(1);
-  const filtered = rows.filter((row) =>
-    searchText(row).toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const filtered = rows.filter((row) => {
+    if (!searchText(row).toLowerCase().includes(query.trim().toLowerCase())) return false;
+    return sortOptions.every(([, getValue], index) => {
+      const filter = (columnFilters[index] || "").trim().toLowerCase();
+      return !filter || String(getValue(row) ?? "").toLowerCase().includes(filter);
+    });
+  });
   const getter = sortOptions[Number(sortKey)]?.[1] || (() => "");
   const sorted = [...filtered].sort((left, right) => {
     const a = getter(left),
@@ -50,7 +57,23 @@ function DataGrid({
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const pageRows = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
-  useEffect(() => setPage(1), [query, sortKey, direction, pageSize, rows.length]);
+  useEffect(() => setPage(1), [query, columnFilters, sortKey, direction, pageSize, rows.length]);
+  const downloadCsv = () => {
+    const csvCell = (value: any) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csv = [
+      sortOptions.map(([label]) => csvCell(label)).join(","),
+      ...sorted.map((row) => sortOptions.map(([, getValue]) => csvCell(getValue(row))).join(",")),
+    ].join("\r\n");
+    const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${exportName}-${today()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
   return (
     <div className="dataGrid">
       <div className="dataGridToolbar">
@@ -83,7 +106,25 @@ function DataGrid({
             {[10, 25, 50, 100].map((size) => <option key={size}>{size}</option>)}
           </select>
         </label>
+        <button className="dataGridExport" type="button" onClick={downloadCsv} disabled={!sorted.length}>
+          Download CSV
+        </button>
         <span className="dataGridCount">{filtered.length.toLocaleString()} row{filtered.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="dataGridColumnFilters" aria-label="Column filters">
+        {sortOptions.map(([label], index) => (
+          <label key={label}>
+            {label}
+            <input
+              value={columnFilters[index] || ""}
+              placeholder={`Filter ${label.toLowerCase()}…`}
+              onChange={(event) => setColumnFilters({ ...columnFilters, [index]: event.target.value })}
+            />
+          </label>
+        ))}
+        {Object.values(columnFilters).some((value) => value) && (
+          <button type="button" onClick={() => setColumnFilters({})}>Clear column filters</button>
+        )}
       </div>
       {children(pageRows)}
       <div className="dataGridPager">
@@ -1182,7 +1223,9 @@ function WesternElectricPanel({ series }: any) {
     })}</div>
     <section className="analysisChartCard">
       <div className="panelTitle"><div><h3>Detected Rule Violations</h3><p className="muted">Rules are evaluated chronologically for each numerical attribute using the displayed population mean and sigma.</p></div><Badge>{rows.length} SIGNALS</Badge></div>
-      <div className="tablewrap"><table><thead><tr><th>Rule</th><th>Attribute</th><th>Reference</th><th>Value</th><th>Z-score</th><th>Evaluation Window</th></tr></thead><tbody>{rows.map((row: any, index: number) => <tr key={`${row.code}-${row.rule}-${row.index}-${index}`}><td><Badge>{row.rule}</Badge></td><td><b>{row.code}</b><br/><small>{row.name}</small></td><td>{row.reference_id}</td><td>{Number(row.value).toFixed(3)} {row.uom}</td><td>{row.z_score.toFixed(2)}σ</td><td><small>{row.window}</small></td></tr>)}</tbody></table>{!rows.length && <div className="empty">No Western Electric rule violations were detected in the selected population.</div>}</div>
+      <DataGrid rows={rows} searchText={(row) => `${row.rule} ${row.code} ${row.name} ${row.reference_id} ${row.value} ${row.z_score} ${row.window}`} sortOptions={[["Rule", (row) => row.rule], ["Attribute", (row) => `${row.code} · ${row.name}`], ["Reference", (row) => row.reference_id], ["Value", (row) => Number(row.value)], ["Z-score", (row) => row.z_score], ["Evaluation Window", (row) => row.window]]} exportName="western-electric-violations">
+      {(gridRows) => <div className="tablewrap"><table><thead><tr><th>Rule</th><th>Attribute</th><th>Reference</th><th>Value</th><th>Z-score</th><th>Evaluation Window</th></tr></thead><tbody>{gridRows.map((row: any, index: number) => <tr key={`${row.code}-${row.rule}-${row.index}-${index}`}><td><Badge>{row.rule}</Badge></td><td><b>{row.code}</b><br/><small>{row.name}</small></td><td>{row.reference_id}</td><td>{Number(row.value).toFixed(3)} {row.uom}</td><td>{row.z_score.toFixed(2)}σ</td><td><small>{row.window}</small></td></tr>)}</tbody></table>{!gridRows.length && <div className="empty">No Western Electric rule violations were detected in the selected population.</div>}</div>}
+      </DataGrid>
     </section>
   </>;
 }
@@ -4093,7 +4136,9 @@ function Detail({ r, act, tests, setTests, openTests, saveTests }: any) {
               <button type="button" onClick={() => setComparisonOpen(false)}>×</button>
             </div>
             <div className="comparisonLegend"><span><i className="comparisonDot pass"/>Within specification</span><span><i className="comparisonDot fail"/>Deviation</span><span><i className="comparisonDot pending"/>Result pending</span></div>
-            <div className="tablewrap"><table className="comparisonTable"><thead><tr><th>Attribute</th><th>Unit</th><th>Minimum</th><th>Aim / Required</th><th>Maximum</th><th>Actual</th><th>Evaluation</th></tr></thead><tbody>{comparisonTests.map((test: any) => <tr className={test.evaluation === "FAIL" ? "comparisonFail" : test.evaluation === "PASS" ? "comparisonPass" : "comparisonPending"} key={test.specification_attribute_id}><td><b>{test.code}</b><br/><small>{test.name}</small></td><td>{test.uom || "—"}</td><td>{test.lsl ?? "—"}</td><td>{test.aim_value ?? test.target_value ?? "—"}</td><td>{test.usl ?? "—"}</td><td className="actualValue">{test.result ?? "Pending"}</td><td><Badge>{test.evaluation}</Badge></td></tr>)}</tbody></table>{!comparisonTests.length && <div className="empty">No quality attributes are available for comparison.</div>}</div>
+            <DataGrid rows={comparisonTests} searchText={(test) => `${test.code} ${test.name} ${test.uom || ""} ${test.lsl ?? ""} ${test.aim_value ?? test.target_value ?? ""} ${test.usl ?? ""} ${test.result ?? "Pending"} ${test.evaluation}`} sortOptions={[["Attribute", (test) => `${test.code} · ${test.name}`], ["Unit", (test) => test.uom || ""], ["Minimum", (test) => test.lsl], ["Aim / Required", (test) => test.aim_value ?? test.target_value], ["Maximum", (test) => test.usl], ["Actual", (test) => test.result ?? "Pending"], ["Evaluation", (test) => test.evaluation]]} exportName="quality-specification-vs-actual">
+            {(gridRows) => <div className="tablewrap"><table className="comparisonTable"><thead><tr><th>Attribute</th><th>Unit</th><th>Minimum</th><th>Aim / Required</th><th>Maximum</th><th>Actual</th><th>Evaluation</th></tr></thead><tbody>{gridRows.map((test: any) => <tr className={test.evaluation === "FAIL" ? "comparisonFail" : test.evaluation === "PASS" ? "comparisonPass" : "comparisonPending"} key={test.specification_attribute_id}><td><b>{test.code}</b><br/><small>{test.name}</small></td><td>{test.uom || "—"}</td><td>{test.lsl ?? "—"}</td><td>{test.aim_value ?? test.target_value ?? "—"}</td><td>{test.usl ?? "—"}</td><td className="actualValue">{test.result ?? "Pending"}</td><td><Badge>{test.evaluation}</Badge></td></tr>)}</tbody></table>{!gridRows.length && <div className="empty">No quality attributes are available for comparison.</div>}</div>}
+            </DataGrid>
             <div className="actions"><button type="button" onClick={() => setComparisonOpen(false)}>Close</button></div>
           </div>
         </div>
